@@ -2,11 +2,13 @@ use core::cell::Cell;
 
 use cortex_m::singleton;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
-use embassy_stm32::interrupt::typelevel::Binding;
+use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::peripherals::{TIM2, USART1, USART2};
+use embassy_stm32::time::Hertz;
+use embassy_stm32::timer::low_level::CountingMode;
+use embassy_stm32::timer::simple_pwm::{Ch1, Ch2, Ch4, PwmPin, SimplePwm};
 use embassy_stm32::usart::{
-    BufferedInterruptHandler, BufferedUart, Config as UsartConfig, HalfDuplexConfig, Instance,
-    RxPin, TxPin, Uart,
+    BufferedUart, Config as UsartConfig, HalfDuplexConfig, RxPin, TxPin, Uart,
 };
 use embassy_stm32::{bind_interrupts, peripherals, usart};
 use embedded_io_async::Write;
@@ -17,62 +19,114 @@ use crate::blinker;
 ///
 
 #[allow(dead_code)]
-pub struct Board {}
+
+// ------------------------------------------------------------------------------------------------
+// Peripheral assignments for the board
+
+type DbgUsart = USART1;
+type DbgUsartRx = peripherals::PA10;
+type DbgUsartTx = peripherals::PA9;
+type BusUsart = USART2;
+type BusUsartTx = peripherals::PA2;
+type LedTimer = TIM2;
 
 bind_interrupts!(struct Irqs {
-        USART1 => usart::BufferedInterruptHandler<peripherals::USART1>;
-        USART2 => usart::InterruptHandler<peripherals::USART2>;
+        USART1 => usart::BufferedInterruptHandler<USART1>;
+        USART2 => usart::InterruptHandler<USART2>;
 });
 
-type DbgUsart = peripherals::USART1;
-type BusUsart = peripherals::USART2;
+// ------------------------------------------------------------------------------------------------
 
-impl Board {
-    #[allow(unused_variables)]
-    pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
-        let led_blue = Output::new(p.PA0, Level::Low, Speed::Low);
-        let led_green = Output::new(p.PA1, Level::Low, Speed::Low);
-        let led_red = Output::new(p.PA3, Level::Low, Speed::Low);
-        let led_status1 = Output::new(p.PB15, Level::Low, Speed::VeryHigh);
-        let led_status2 = Output::new(p.PB14, Level::Low, Speed::VeryHigh);
-        let led_status3 = Output::new(p.PB13, Level::Low, Speed::VeryHigh);
-        let led_status4 = Output::new(p.PB12, Level::Low, Speed::VeryHigh);
-        let pir_1 = Input::new(p.PB10, Pull::Up);
-        let pir_2 = Input::new(p.PB2, Pull::Up);
-        let rf_cs = Output::new(p.PB0, Level::High, Speed::Medium);
-        let rf_int = Input::new(p.PB11, Pull::Up);
-        let rf_rst = Output::new(p.PB1, Level::High, Speed::Medium);
-        let ser_out_en = Output::new(p.PA4, Level::High, Speed::Medium);
-        let usb_pullup = Output::new(p.PA15, Level::High, Speed::Low);
-        let user_btn = Input::new(p.PA8, Pull::Up);
+#[allow(unused_variables)]
+pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
+    let bus_usart = p.USART2;
+    let bus_usart_tx = p.PA2;
+    let bus_usart_tx_dma = p.DMA1_CH7;
+    let bus_usart_rx_dma = p.DMA1_CH6;
+    let dbg_usart = p.USART1;
+    let dbg_usart_rx = p.PA10;
+    let dbg_usart_tx = p.PA9;
+    let led_timer = p.TIM2;
+    let led_red = PwmPin::<TIM2, Ch1>::new_ch1(p.PA0, OutputType::PushPull);
+    let led_green = PwmPin::<TIM2, Ch2>::new_ch2(p.PA1, OutputType::PushPull);
+    #[cfg(feature = "rev-d")]
+    let led_blue = PwmPin::<TIM2, Ch4>::new_ch4(p.PA2, OutputType::PushPull);
+    #[cfg(feature = "rev-e")]
+    let led_blue = PwmPin::<TIM2, Ch4>::new_ch4(p.PA3, OutputType::PushPull);
+    let led_status1 = Output::new(p.PB15, Level::Low, Speed::VeryHigh);
+    let led_status2 = Output::new(p.PB14, Level::Low, Speed::VeryHigh);
+    let led_status3 = Output::new(p.PB13, Level::Low, Speed::VeryHigh);
+    let led_status4 = Output::new(p.PB12, Level::Low, Speed::VeryHigh);
+    let pir_1 = Input::new(p.PB10, Pull::Up);
+    let pir_2 = Input::new(p.PB2, Pull::Up);
+    let rf_cs = Output::new(p.PB0, Level::High, Speed::Medium);
+    let rf_int = Input::new(p.PB11, Pull::Up);
+    let rf_rst = Output::new(p.PB1, Level::High, Speed::Medium);
+    let ser_out_en = Output::new(p.PA4, Level::High, Speed::Medium);
+    let usb_pullup = Output::new(p.PA15, Level::High, Speed::Low);
+    let user_btn = Input::new(p.PA8, Pull::Up);
 
-        unsafe {
-            STATUS_LEDS_PTR = singleton!(STATUS_LEDS: StatusLEDs = StatusLEDs {
-                leds: [led_status1, led_status2, led_status3, led_status4],
-            })
-            .unwrap();
-        }
-
-        let the_blinker = blinker::Blinker {};
-        the_blinker.spawn(spawner);
-
-        let mut usart_bus = Uart::new_half_duplex(
-            p.USART2,
-            p.PA2,
-            Irqs,
-            p.DMA1_CH7,
-            p.DMA1_CH6,
-            UsartConfig::default(),
-            HalfDuplexConfig::PushPull,
-        )
+    unsafe {
+        STATUS_LEDS_PTR = singleton!(STATUS_LEDS: StatusLEDs = StatusLEDs {
+            leds: [led_status1, led_status2, led_status3, led_status4],
+        })
         .unwrap();
+    }
 
-        spawn_dbg(spawner, p.USART1, p.PA10, p.PA9);
+    let the_blinker = blinker::Blinker {};
+    the_blinker.spawn(spawner);
 
-        loop {
-            let _ = usart_bus.write_all(b"AUNISOMA> ").await;
+    let mut usart_bus = Uart::new_half_duplex(
+        bus_usart,
+        bus_usart_tx,
+        Irqs,
+        bus_usart_tx_dma,
+        bus_usart_rx_dma,
+        UsartConfig::default(),
+        HalfDuplexConfig::PushPull,
+    )
+    .unwrap();
+
+    spawn_dbg(spawner, dbg_usart, dbg_usart_rx, dbg_usart_tx);
+
+    spawner
+        .spawn(led_pwm_task(LedPwm::new(
+            led_timer, led_red, led_green, led_blue,
+        )))
+        .unwrap();
+}
+
+struct LedPwm {
+    pwm: SimplePwm<'static, LedTimer>,
+}
+
+impl LedPwm {
+    pub fn new(
+        timer: LedTimer,
+        led_red: PwmPin<'static, LedTimer, Ch1>,
+        led_green: PwmPin<'static, LedTimer, Ch2>,
+        led_blue: PwmPin<'static, LedTimer, Ch4>,
+    ) -> Self {
+        Self {
+            pwm: SimplePwm::new(
+                timer,
+                Some(led_red),
+                Some(led_green),
+                None,
+                Some(led_blue),
+                Hertz(1000),
+                CountingMode::EdgeAlignedUp,
+            ),
         }
     }
+}
+
+#[embassy_executor::task]
+async fn led_pwm_task(led_pwm: LedPwm) {
+    let mut channels = led_pwm.pwm.split();
+    channels.ch1.set_duty_cycle_fraction(127, 255);
+    channels.ch2.set_duty_cycle_fraction(127, 255);
+    channels.ch4.set_duty_cycle_fraction(127, 255);
 }
 
 static mut DBG_USART_PTR: Cell<*mut BufferedUart<'static>> = Cell::new(core::ptr::null_mut());

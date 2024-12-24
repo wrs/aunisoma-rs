@@ -11,14 +11,14 @@ use core::fmt::Write;
 async fn main(spawner: Spawner) {
     let peripherals = embassy_stm32::init(Default::default());
 
-    board::Board::hookup(spawner, peripherals).await;
+    board::hookup(spawner, peripherals).await;
 
     log!{"Started\n"}
     loop {
-        StatusLEDs::set(4);
-        Timer::after_millis(1000).await;
-        StatusLEDs::reset(4);
-        Timer::after_millis(1000).await;
+        StatusLEDs::set(3);
+        Timer::after_millis(2000).await;
+        StatusLEDs::reset(3);
+        Timer::after_millis(2000).await;
     }
 }
 

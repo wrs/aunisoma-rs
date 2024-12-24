@@ -5,6 +5,11 @@ version = "0.1.0"
 authors = ["Walter Smith <walter@wrsmap.com>"]
 resolver = "2"
 
+[features]
+default = ["rev-e"]
+rev-d = []
+rev-e = []
+
 [dependencies]
 panic-halt = "1.0.0"
 
