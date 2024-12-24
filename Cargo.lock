@@ -37,6 +37,7 @@ dependencies = [
  "embedded-storage",
  "heapless",
  "panic-halt",
+ "panic-itm",
  "static_cell",
 ]
 
@@ -498,6 +499,15 @@ name = "panic-halt"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
+
+[[package]]
+name = "panic-itm"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d577d97d1b31268087b6dddf2470e6794ef5eee87d9dca7fcd0481695391a4c"
+dependencies = [
+ "cortex-m",
+]
 
 [[package]]
 name = "pin-project-lite"

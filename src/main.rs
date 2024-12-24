@@ -4,8 +4,7 @@
 use board::StatusLEDs;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
-// use panic_halt as _;
-use core::panic::PanicInfo;
+use panic_itm as _;
 use core::fmt::Write;
 
 #[embassy_executor::main]
@@ -23,12 +22,12 @@ async fn main(spawner: Spawner) {
     }
 }
 
-#[inline(never)]
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    log!("PANIC\n");
-    loop {}
-}
+// #[inline(never)]
+// #[panic_handler]
+// fn panic(_info: &PanicInfo) -> ! {
+//     log!("PANIC");
+//     loop {}
+// }
 
 mod board;
 mod blinker;
