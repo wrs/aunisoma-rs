@@ -48,15 +48,12 @@ impl Board {
 
         unsafe {
             STATUS_LEDS_PTR = singleton!(STATUS_LEDS: StatusLEDs = StatusLEDs {
-                leds: [led_status3, led_status4],
+                leds: [led_status1, led_status2, led_status3, led_status4],
             })
             .unwrap();
         }
 
-        let the_blinker = blinker::Blinker {
-            led: led_status1,
-            led2: led_status2,
-        };
+        let the_blinker = blinker::Blinker {};
         the_blinker.spawn(spawner);
 
         let mut usart_bus = Uart::new_half_duplex(
@@ -102,7 +99,12 @@ fn spawn_dbg(
 
 #[embassy_executor::task]
 async fn dbg_task() {
-    let usart_dbg = unsafe { DBG_USART_PTR.replace(core::ptr::null_mut()).as_mut().unwrap() };
+    let usart_dbg = unsafe {
+        DBG_USART_PTR
+            .replace(core::ptr::null_mut())
+            .as_mut()
+            .unwrap()
+    };
     loop {
         let _ = usart_dbg.write_all(b"AUNISOMA> ").await;
     }
@@ -111,7 +113,7 @@ async fn dbg_task() {
 static mut STATUS_LEDS_PTR: *mut StatusLEDs = core::ptr::null_mut();
 
 pub struct StatusLEDs {
-    leds: [Output<'static>; 2],
+    leds: [Output<'static>; 4],
 }
 
 unsafe impl Sync for StatusLEDs {}
@@ -119,16 +121,12 @@ unsafe impl Sync for StatusLEDs {}
 impl StatusLEDs {
     pub fn set(which: usize) {
         let leds = unsafe { STATUS_LEDS_PTR.as_mut().unwrap() };
-        if which < leds.leds.len() {
-            leds.leds[which].set_level(Level::High);
-        }
+        leds.leds[which].set_level(Level::High);
     }
 
     pub fn reset(which: usize) {
         let leds = unsafe { STATUS_LEDS_PTR.as_mut().unwrap() };
-        if which < leds.leds.len() {
-            leds.leds[which].set_level(Level::Low);
-        }
+        leds.leds[which].set_level(Level::Low);
     }
 }
 

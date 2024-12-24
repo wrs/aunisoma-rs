@@ -36,7 +36,7 @@ static_cell = "2.1.0"
 panic-itm = "0.4.2"
 
 [profile.dev]
-opt-level = 3
+opt-level = 2
 lto = true
 
 [profile.release]
