@@ -1,0 +1,12 @@
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# runner = "probe-rs run --chip STM32F103C8"
+runner = "arm-none-eabi-gdb -q -x openocd.gdb"
+
+[build]
+target = "thumbv7m-none-eabi"
+rustflags = ["-Clink-args=-Map=target/app.map"]
+
+[env]
+DEFMT_LOG = "info"
+
+# Link scripts are set in build.rs

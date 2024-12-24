@@ -1,0 +1,5 @@
+{
+    "cortex-debug.openocdPath": "/opt/homebrew/bin/openocd",
+    "rust-analyzer.imports.preferNoStd": true,
+    "cortex-debug.variableUseNaturalFormat": false
+}
