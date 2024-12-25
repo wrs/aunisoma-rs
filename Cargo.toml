@@ -27,7 +27,6 @@ embassy-executor = { path = "../embassy/embassy-executor", features = [
 ] }
 embassy-stm32 = { path = "../embassy/embassy-stm32", features = [
     "stm32f103c8",
-    "unstable-pac",
     "memory-x",
     "time-driver-any",
 ] }

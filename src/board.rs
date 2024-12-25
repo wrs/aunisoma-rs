@@ -183,22 +183,3 @@ impl StatusLEDs {
         leds.leds[which].set_level(Level::Low);
     }
 }
-
-// Set GPIOB directly to control status LEDs as fast as possible.
-// Status LEDs are assumed to be on PB15-12, active high.
-
-pub fn set_status(which: u8) {
-    if which < 4 {
-        embassy_stm32::pac::GPIOB
-            .bsrr()
-            .write(|w| w.set_bs(15 - which as usize, true));
-    }
-}
-
-pub fn reset_status(which: u8) {
-    if which < 4 {
-        embassy_stm32::pac::GPIOB
-            .bsrr()
-            .write(|w| w.set_br(15 - which as usize, true));
-    }
-}
