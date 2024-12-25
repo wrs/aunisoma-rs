@@ -2,7 +2,8 @@ use core::fmt::Error as FmtError;
 use core::fmt::Write;
 use cortex_m::peripheral::ITM;
 
-fn itm_write_str(s: &str) -> Result<(), FmtError> {
+#[inline(never)]
+pub fn itm_write_str(s: &str) -> Result<(), FmtError> {
     let itm = ITM::PTR;
     for byte in s.bytes() {
         unsafe {

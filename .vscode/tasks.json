@@ -4,6 +4,13 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "Tail defmt log",
+            "type": "shell",
+            "command": "tail -F /tmp/defmt.txt | defmt-print -w -e ./target/thumbv7m-none-eabi/debug/${workspaceFolderBasename}",
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
             /*
              * This is the default cargo build task,
              * but we need to provide a label for it,

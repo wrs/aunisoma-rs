@@ -7,13 +7,18 @@
     "version": "0.2.0",
     "configurations": [
         {
-            /* Configuration for the STM32F103C8 board */
             "type": "cortex-debug",
             "request": "launch",
             "name": "Debug (OpenOCD)",
+            "preLaunchTask": "Cargo Build (debug)",
+            "postLaunchCommands": [
+                "shell echo -n '' > /tmp/defmt.txt",
+                "monitor stm32f1x.tpiu configure -protocol uart -traceclk 8000000 -pin-freq 2000000 -output /tmp/defmt.txt",
+                "monitor stm32f1x.cpu itm port 0 on",
+                "monitor stm32f1x.tpiu enable"
+            ],
             "servertype": "openocd",
             "cwd": "${workspaceRoot}",
-            "preLaunchTask": "Cargo Build (debug)",
             "runToEntryPoint": "main",
             "executable": "./target/thumbv7m-none-eabi/debug/${workspaceFolderBasename}",
             "device": "STM32F103C8",
@@ -22,15 +27,33 @@
                 "target/stm32f1x.cfg"
             ],
             "svdFile": "${workspaceRoot}/.vscode/STM32F103.svd",
-            "swoConfig": {
-                "enabled": true,
-                "cpuFrequency": 8000000,
-                "swoFrequency": 2000000,
-                "source": "probe",
-                "decoders": [
-                    { "type": "console", "label": "ITM", "port": 0 }
-                ]
-            }
+            // "showDevDebugOutput": "raw",
+            // "swoConfig": {
+            //     "enabled": true,
+            //     "cpuFrequency": 8000000,
+            //     "swoFrequency": 2000000,
+            //     "source": "probe",
+            //     "decoders": [
+            //         {
+            //             "type": "console",
+            //             "label": "ITM",
+            //             "port": 0,
+            //             "logfile": "/tmp/defmt.txt"
+            //         },
+            //     ]
+            // },
+            // "rttConfig": {
+            //     "enabled": true,
+            //     "address": "auto",
+            //     "decoders": [
+            //         {
+            //             "type": "console",
+            //             "label": "RTT",
+            //             "port": 0,
+            //             "logfile": "/tmp/defmt.txt"
+            //         },
+            //     ]
+            // }
         }
     ]
 }

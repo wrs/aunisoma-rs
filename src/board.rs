@@ -1,5 +1,4 @@
 use core::cell::Cell;
-use core::fmt::Write;
 
 use cortex_m::singleton;
 use embassy_executor::Spawner;
@@ -16,8 +15,7 @@ use embassy_stm32::{bind_interrupts, peripherals, usart};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use rfm69::Rfm69;
 
-use crate::logger;
-use crate::{blinker, log};
+use crate::blinker;
 
 /// Maps logical pins to physical pins
 ///
@@ -43,6 +41,7 @@ bind_interrupts!(struct Irqs {
 // ------------------------------------------------------------------------------------------------
 
 #[allow(unused_variables)]
+#[inline(never)]
 pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
     let bus_usart = p.USART2;
     let bus_usart_tx = p.PA2;
