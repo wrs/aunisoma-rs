@@ -38,6 +38,8 @@ cortex-m-rt = "0.7.3"
 heapless = "0.8.0"
 static_cell = "2.1.0"
 panic-itm = "0.4.2"
+rfm69 = "0.6.0"
+embedded-hal-bus = "0.2.0"
 
 [profile.dev]
 opt-level = 2

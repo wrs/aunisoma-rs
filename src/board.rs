@@ -1,9 +1,11 @@
 use core::cell::Cell;
+use core::fmt::Write;
 
 use cortex_m::singleton;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
-use embassy_stm32::peripherals::{TIM2, USART1, USART2};
+use embassy_stm32::peripherals::{SPI1, TIM2, USART1, USART2};
+use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::CountingMode;
 use embassy_stm32::timer::simple_pwm::{Ch1, Ch2, Ch4, PwmPin, SimplePwm};
@@ -11,9 +13,11 @@ use embassy_stm32::usart::{
     BufferedUart, Config as UsartConfig, HalfDuplexConfig, RxPin, TxPin, Uart,
 };
 use embassy_stm32::{bind_interrupts, peripherals, usart};
-use embedded_io_async::Write;
+use embedded_hal_bus::spi::ExclusiveDevice;
+use rfm69::Rfm69;
 
-use crate::blinker;
+use crate::logger;
+use crate::{blinker, log};
 
 /// Maps logical pins to physical pins
 ///
@@ -29,6 +33,7 @@ type DbgUsartTx = peripherals::PA9;
 type BusUsart = USART2;
 type BusUsartTx = peripherals::PA2;
 type LedTimer = TIM2;
+type RadioSpi = SPI1;
 
 bind_interrupts!(struct Irqs {
         USART1 => usart::BufferedInterruptHandler<USART1>;
@@ -59,6 +64,12 @@ pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
     let led_status4 = Output::new(p.PB12, Level::Low, Speed::VeryHigh);
     let pir_1 = Input::new(p.PB10, Pull::Up);
     let pir_2 = Input::new(p.PB2, Pull::Up);
+    let rf_spi = p.SPI1;
+    let rf_sck = p.PA5;
+    let rf_miso = p.PA6;
+    let rf_mosi = p.PA7;
+    let rf_tx_dma = p.DMA1_CH3;
+    let rf_rx_dma = p.DMA1_CH2;
     let rf_cs = Output::new(p.PB0, Level::High, Speed::Medium);
     let rf_int = Input::new(p.PB11, Pull::Up);
     let rf_rst = Output::new(p.PB1, Level::High, Speed::Medium);
@@ -76,7 +87,7 @@ pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
     let the_blinker = blinker::Blinker {};
     the_blinker.spawn(spawner);
 
-    let mut usart_bus = Uart::new_half_duplex(
+    let usart_bus = Uart::new_half_duplex(
         bus_usart,
         bus_usart_tx,
         Irqs,
@@ -94,6 +105,15 @@ pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
             led_timer, led_red, led_green, led_blue,
         )))
         .unwrap();
+
+    let spi_config: SpiConfig = Default::default();
+    let spi_bus = Spi::new_blocking(rf_spi, rf_sck, rf_mosi, rf_miso, spi_config);
+    let spi_device = ExclusiveDevice::new_no_delay(spi_bus, rf_cs).unwrap();
+    let mut radio = Rfm69::new(spi_device);
+    radio.mode(rfm69::registers::Mode::Sleep).unwrap();
+    radio.frequency(915_000_000).unwrap();
+    for (index, val) in radio.read_all_regs().unwrap().iter().enumerate() {
+    }
 }
 
 struct LedPwm {
@@ -160,7 +180,7 @@ async fn dbg_task() {
             .unwrap()
     };
     loop {
-        let _ = usart_dbg.write_all(b"AUNISOMA> ").await;
+        let _ = embedded_io_async::Write::write_all(usart_dbg, b"AUNISOMA> ").await;
     }
 }
 
