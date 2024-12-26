@@ -16,11 +16,13 @@ pub async fn blink(led: usize, delay_ms: u64) {
 
 #[embassy_executor::task]
 pub async fn task() {
+    defmt::info!("blink task started");
     blink(0, 100).await;
 }
 
 #[embassy_executor::task]
 pub async fn task2() {
+    defmt::info!("blink task2 started");
     blink(1, 105).await;
 }
 

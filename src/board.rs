@@ -12,6 +12,7 @@ use embassy_stm32::usart::{
     BufferedUart, Config as UsartConfig, HalfDuplexConfig, RxPin, TxPin, Uart,
 };
 use embassy_stm32::{bind_interrupts, peripherals, usart};
+use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use rfm69::Rfm69;
 
@@ -111,8 +112,9 @@ pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
     let mut radio = Rfm69::new(spi_device);
     radio.mode(rfm69::registers::Mode::Sleep).unwrap();
     radio.frequency(915_000_000).unwrap();
-    for (index, val) in radio.read_all_regs().unwrap().iter().enumerate() {
-    }
+    // TODO More radio setup
+
+
 }
 
 struct LedPwm {
@@ -142,6 +144,8 @@ impl LedPwm {
 
 #[embassy_executor::task]
 async fn led_pwm_task(led_pwm: LedPwm) {
+    defmt::info!("led_pwm_task started");
+
     let mut channels = led_pwm.pwm.split();
     channels.ch1.set_duty_cycle_fraction(127, 255);
     channels.ch2.set_duty_cycle_fraction(127, 255);
@@ -172,6 +176,8 @@ fn spawn_dbg(
 
 #[embassy_executor::task]
 async fn dbg_task() {
+    defmt::info!("dbg_task started");
+
     let usart_dbg = unsafe {
         DBG_USART_PTR
             .replace(core::ptr::null_mut())
@@ -180,6 +186,7 @@ async fn dbg_task() {
     };
     loop {
         let _ = embedded_io_async::Write::write_all(usart_dbg, b"AUNISOMA> ").await;
+        Timer::after(Duration::from_millis(100)).await;
     }
 }
 

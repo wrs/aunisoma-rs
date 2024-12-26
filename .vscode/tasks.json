@@ -4,6 +4,13 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "Defmt RTT log",
+            "type": "shell",
+            "command": "defmt-print -w -e target/thumbv7m-none-eabi/debug/${workspaceFolderBasename} tcp --port 60004",
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
             "label": "Tail defmt log",
             "type": "shell",
             "command": "tail -F /tmp/defmt.txt | defmt-print -w -e ./target/thumbv7m-none-eabi/debug/${workspaceFolderBasename}",
