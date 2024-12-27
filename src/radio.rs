@@ -8,7 +8,7 @@ use embassy_stm32::{
 };
 use embassy_time::Timer;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
-use rfm69::registers;
+use rfm69::registers::{self, Registers};
 use rfm69::registers::{
     ContinuousDagc, DataMode, DccCutoff, FifoMode, InterPacketRxDelay, LnaConfig, LnaGain,
     LnaImpedance, Mode, Modulation, ModulationShaping, ModulationType, PacketConfig, PacketDc,
@@ -17,6 +17,7 @@ use rfm69::registers::{
 use rfm69::Rfm69;
 
 const FREQUENCY: u32 = 915_000_000;
+const BITRATE: u32 = 250_000;
 
 #[embassy_executor::task]
 pub(crate) async fn radio_task(
@@ -58,12 +59,22 @@ async fn setup_radio(
     rf_rst.set_low();
     Timer::after_millis(5).await;
 
+    for (index, val) in radio.read_all_regs().unwrap().iter().enumerate() {
+        defmt::println!("{}: {}", index, val);
+    }
     // See if the radio exists
     let version = radio.read(registers::Registers::Version)?;
     if version == 0 {
         defmt::info!("Radio not found");
         return Err(Rfm69Error::Timeout);
     }
+
+    radio.mode(Mode::Standby)?;
+
+    // Start TX when first byte reaches FIFO
+    radio.fifo_mode(FifoMode::NotEmpty)?;
+
+    radio.continuous_dagc(ContinuousDagc::ImprovedMarginAfcLowBetaOn0)?;
 
     radio
         .dio_mapping(registers::DioMapping {
@@ -72,35 +83,37 @@ async fn setup_radio(
             dio_mode: registers::DioMode::Rx,
         })
         .unwrap();
-    radio.mode(Mode::Standby)?;
-    radio.modulation(Modulation {
-        data_mode: DataMode::Packet,
-        modulation_type: ModulationType::Fsk,
-        shaping: ModulationShaping::Shaping00,
-    })?;
-    radio.bit_rate(55_555)?;
-    radio.frequency(FREQUENCY)?;
-    radio.fdev(50_000)?;
-    radio.rx_bw(RxBw {
-        dcc_cutoff: DccCutoff::Percent4,
-        rx_bw: RxBwFsk::Khz125dot0,
-    })?;
-    radio.preamble(3)?;
-    radio.sync(&[0x2d, 0])?;
+
+    radio.rssi_threshold(220)?;
+    radio.sync(&[0x2d, 0xd4])?;
     radio.packet(PacketConfig {
         format: PacketFormat::Variable(66),
-        dc: PacketDc::None,
+        dc: PacketDc::Whitening,
         filtering: PacketFiltering::None,
         crc: true,
         interpacket_rx_delay: InterPacketRxDelay::Delay2Bits,
         auto_rx_restart: true,
     })?;
-    radio.fifo_mode(FifoMode::NotEmpty)?;
+    radio.modulation(Modulation {
+        data_mode: DataMode::Packet,
+        modulation_type: ModulationType::Fsk,
+        shaping: ModulationShaping::Shaping01,
+    })?;
+    radio.preamble(4)?;
+    radio.bit_rate(BITRATE)?;
+    radio.frequency(FREQUENCY)?;
+    radio.fdev(50_000)?;
+    // reg 0x19 RxBw = 0xe0 = 0b11100000
+    // -> DccFreq = 7, RxBwMant = 00, RxBwExp = 000
+    radio.rx_bw(RxBw {
+        dcc_cutoff: DccCutoff::Percent0dot125,
+        rx_bw: RxBwFsk::Khz500dot0,
+    })?;
+    assert_eq!(radio.read(Registers::RxBw)?, 0xe0);
     radio.lna(LnaConfig {
         zin: LnaImpedance::Ohm50,
         gain_select: LnaGain::AgcLoop,
     })?;
-    radio.rssi_threshold(220)?;
-    radio.continuous_dagc(ContinuousDagc::ImprovedMarginAfcLowBetaOn0)?;
+
     Ok(radio)
 }

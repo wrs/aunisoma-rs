@@ -85,10 +85,10 @@ pub async fn init(spawner: Spawner) {
     let rf_mosi = p.PA7;
     let rf_tx_dma = p.DMA1_CH3;
     let rf_rx_dma = p.DMA1_CH2;
-    let rf_cs = Output::new(p.PB0, Level::High, Speed::Medium);
+    let rf_cs = Output::new(p.PB0, Level::High, Speed::VeryHigh);
     let rf_int = Input::new(p.PB11, Pull::Up);
-    let rf_rst = Output::new(p.PB1, Level::Low, Speed::Medium);
-    let ser_out_en = Output::new(p.PA4, Level::High, Speed::Medium);
+    let rf_rst = Output::new(p.PB1, Level::Low, Speed::VeryHigh);
+    let ser_out_en = Output::new(p.PA4, Level::High, Speed::VeryHigh);
     let usb_dp = p.PA12;
     let usb_dm = p.PA11;
     let usb_pullup = Output::new(p.PA15, Level::High, Speed::Low);

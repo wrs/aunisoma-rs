@@ -5,8 +5,12 @@
     "tasks": [
         {
             "label": "Defmt RTT log",
-            "type": "shell",
-            "command": "defmt-print -w -e target/thumbv7m-none-eabi/debug/${workspaceFolderBasename} tcp --port 60004",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "-c",
+                "while true; do nc localhost 60004; echo -en \"\r[waiting]\" >&2; sleep 1; done | defmt-print -w -e target/thumbv7m-none-eabi/debug/${workspaceFolderBasename}"
+            ],
             "isBackground": true,
             "problemMatcher": []
         },
@@ -23,10 +27,17 @@
              * but we need to provide a label for it,
              * so we can invoke it from the debug launcher.
              */
-            "label": "Cargo Build (debug)",
+            "label": "Cargo Build (dev)",
             "type": "process",
             "command": "cargo",
-            "args": ["build"],
+            "args": [
+                "build"
+            ],
+            "options": {
+                "env": {
+                    "DEFMT_LOG": "trace"
+                }
+            },
             "problemMatcher": [
                 "$rustc"
             ],
@@ -39,7 +50,15 @@
             "label": "Cargo Build (release)",
             "type": "process",
             "command": "cargo",
-            "args": ["build", "--release"],
+            "args": [
+                "build",
+                "--release"
+            ],
+            "options": {
+                "env": {
+                    "DEFMT_LOG": "trace"
+                }
+            },
             "problemMatcher": [
                 "$rustc"
             ],
@@ -49,7 +68,10 @@
             "label": "Cargo Build Examples (debug)",
             "type": "process",
             "command": "cargo",
-            "args": ["build","--examples"],
+            "args": [
+                "build",
+                "--examples"
+            ],
             "problemMatcher": [
                 "$rustc"
             ],
@@ -59,7 +81,11 @@
             "label": "Cargo Build Examples (release)",
             "type": "process",
             "command": "cargo",
-            "args": ["build","--examples", "--release"],
+            "args": [
+                "build",
+                "--examples",
+                "--release"
+            ],
             "problemMatcher": [
                 "$rustc"
             ],
@@ -69,7 +95,9 @@
             "label": "Cargo Clean",
             "type": "process",
             "command": "cargo",
-            "args": ["clean"],
+            "args": [
+                "clean"
+            ],
             "problemMatcher": [],
             "group": "build"
         },
