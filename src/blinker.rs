@@ -1,9 +1,6 @@
-use embassy_executor::Spawner;
+use crate::StatusLEDs;
+use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
-
-use crate::board::StatusLEDs;
-
-pub struct Blinker {}
 
 pub async fn blink(led: usize, delay_ms: u64) {
     loop {
@@ -14,21 +11,17 @@ pub async fn blink(led: usize, delay_ms: u64) {
     }
 }
 
-#[embassy_executor::task]
 pub async fn task() {
     defmt::info!("blink task started");
     blink(0, 100).await;
 }
 
-#[embassy_executor::task]
 pub async fn task2() {
     defmt::info!("blink task2 started");
     blink(1, 105).await;
 }
 
-impl Blinker {
-    pub fn spawn(self: Blinker, spawner: Spawner) {
-        spawner.spawn(task()).unwrap();
-        spawner.spawn(task2()).unwrap();
-    }
+#[embassy_executor::task]
+pub(crate) async fn blinker_task() {
+    join(task(), task2()).await;
 }

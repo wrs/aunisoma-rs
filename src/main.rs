@@ -3,7 +3,6 @@
 
 use core::{panic::PanicInfo, sync::atomic::AtomicI8};
 
-use board::StatusLEDs;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 // use panic_itm as _;
@@ -11,6 +10,7 @@ use embassy_time::Timer;
 use defmt_itm as _;
 #[cfg(feature = "use-rtt")]
 use defmt_rtt as _;
+use status_leds::StatusLEDs;
 // use panic_halt as _;
 
 #[embassy_executor::main]
@@ -25,23 +25,25 @@ async fn main(spawner: Spawner) {
 
     defmt::info!("Main task started");
 
-    let peripherals = embassy_stm32::init(Default::default());
-    board::hookup(spawner, peripherals).await;
+    board::init(spawner).await;
 
     loop {
-        defmt::info!("on");
         StatusLEDs::set(3);
-        Timer::after_millis(2000).await;
-        defmt::info!("off");
+        Timer::after_millis(100).await;
         StatusLEDs::reset(3);
-        Timer::after_millis(2000).await;
+        Timer::after_millis(100).await;
     }
 }
 
 #[inline(never)]
 #[panic_handler] // built-in ("core") attribute
 fn core_panic(info: &PanicInfo) -> ! {
-    defmt::error!("{}", info);
+    defmt::error!("Panic: {}", info);
+    loop {}
+}
+
+#[defmt::panic_handler]
+fn defmt_panic() -> ! {
     loop {}
 }
 
@@ -94,4 +96,10 @@ extern "Rust" fn _embassy_trace_executor_idle(executor_id: u32) {
 
 mod blinker;
 mod board;
+mod debug_port;
+mod lights;
 mod logger;
+mod panel_bus;
+mod radio;
+mod status_leds;
+mod usb;

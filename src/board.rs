@@ -1,49 +1,64 @@
-use core::cell::Cell;
-
-use cortex_m::singleton;
+use crate::blinker::blinker_task;
+use crate::debug_port::debug_port_task;
+use crate::lights::lights_task;
+use crate::panel_bus::panel_bus_task;
+use crate::radio::radio_task;
+use crate::status_leds::StatusLEDs;
+use crate::usb::usb_task;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::peripherals;
 use embassy_stm32::peripherals::{SPI1, TIM2, USART1, USART2};
-use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::timer::low_level::CountingMode;
-use embassy_stm32::timer::simple_pwm::{Ch1, Ch2, Ch4, PwmPin, SimplePwm};
-use embassy_stm32::usart::{
-    BufferedUart, Config as UsartConfig, HalfDuplexConfig, RxPin, TxPin, Uart,
-};
-use embassy_stm32::{bind_interrupts, peripherals, usart};
-use embassy_time::{Duration, Timer};
-use embedded_hal_bus::spi::ExclusiveDevice;
-use rfm69::Rfm69;
-
-use crate::blinker;
-
-/// Maps logical pins to physical pins
-///
+use embassy_stm32::timer::simple_pwm::{Ch1, Ch2, Ch4, PwmPin};
 
 #[allow(dead_code)]
 
-// ------------------------------------------------------------------------------------------------
-// Peripheral assignments for the board
-
-type DbgUsart = USART1;
-type DbgUsartRx = peripherals::PA10;
-type DbgUsartTx = peripherals::PA9;
-type BusUsart = USART2;
-type BusUsartTx = peripherals::PA2;
-type LedTimer = TIM2;
-type RadioSpi = SPI1;
-
-bind_interrupts!(struct Irqs {
-        USART1 => usart::BufferedInterruptHandler<USART1>;
-        USART2 => usart::InterruptHandler<USART2>;
-});
+pub type DbgUsart = USART1;
+pub type DbgUsartRx = peripherals::PA10;
+pub type DbgUsartTx = peripherals::PA9;
+pub type PanelBusUsart = USART2;
+pub type PanelBusUsartTx = peripherals::PA2;
+pub type PanelBusUsartTxDma = peripherals::DMA1_CH7;
+pub type PanelBusUsartRxDma = peripherals::DMA1_CH6;
+pub type LedTimer = TIM2;
+pub type RadioSpi = SPI1;
+pub type RadioSck = peripherals::PA5;
+pub type RadioMiso = peripherals::PA6;
+pub type RadioMos = peripherals::PA7;
+pub type UsbDp = peripherals::PA12;
+pub type UsbDm = peripherals::PA11;
 
 // ------------------------------------------------------------------------------------------------
 
 #[allow(unused_variables)]
 #[inline(never)]
-pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
+pub async fn init(spawner: Spawner) {
+    let mut config = embassy_stm32::Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hse = Some(Hse {
+            freq: Hertz(16_000_000),
+            mode: HseMode::Oscillator,
+        });
+        config.rcc.pll = Some(Pll {
+            src: PllSource::HSE,
+            prediv: PllPreDiv::DIV2,
+            mul: PllMul::MUL9,
+        });
+        config.rcc.sys = Sysclk::PLL1_P;
+        config.rcc.ahb_pre = AHBPrescaler::DIV1;
+        config.rcc.apb1_pre = APBPrescaler::DIV2;
+        config.rcc.apb2_pre = APBPrescaler::DIV1;
+    }
+
+    let p = embassy_stm32::init(config);
+
+    // Unmap the JTAG pins so we can use PA15 as a GPIO.
+    embassy_stm32::pac::AFIO
+        .mapr()
+        .modify(|w| w.set_swj_cfg(0b010));
+
     let bus_usart = p.USART2;
     let bus_usart_tx = p.PA2;
     let bus_usart_tx_dma = p.DMA1_CH7;
@@ -72,140 +87,26 @@ pub async fn hookup(spawner: Spawner, p: embassy_stm32::Peripherals) {
     let rf_rx_dma = p.DMA1_CH2;
     let rf_cs = Output::new(p.PB0, Level::High, Speed::Medium);
     let rf_int = Input::new(p.PB11, Pull::Up);
-    let rf_rst = Output::new(p.PB1, Level::High, Speed::Medium);
+    let rf_rst = Output::new(p.PB1, Level::Low, Speed::Medium);
     let ser_out_en = Output::new(p.PA4, Level::High, Speed::Medium);
+    let usb_dp = p.PA12;
+    let usb_dm = p.PA11;
     let usb_pullup = Output::new(p.PA15, Level::High, Speed::Low);
     let user_btn = Input::new(p.PA8, Pull::Up);
 
-    unsafe {
-        STATUS_LEDS_PTR = singleton!(STATUS_LEDS: StatusLEDs = StatusLEDs {
-            leds: [led_status1, led_status2, led_status3, led_status4],
-        })
-        .unwrap();
-    }
+    StatusLEDs::init([led_status1, led_status2, led_status3, led_status4]);
 
-    let the_blinker = blinker::Blinker {};
-    the_blinker.spawn(spawner);
-
-    let usart_bus = Uart::new_half_duplex(
+    spawner.must_spawn(blinker_task());
+    spawner.must_spawn(debug_port_task(dbg_usart, dbg_usart_rx, dbg_usart_tx));
+    spawner.must_spawn(panel_bus_task(
         bus_usart,
         bus_usart_tx,
-        Irqs,
         bus_usart_tx_dma,
         bus_usart_rx_dma,
-        UsartConfig::default(),
-        HalfDuplexConfig::PushPull,
-    )
-    .unwrap();
-
-    spawn_dbg(spawner, dbg_usart, dbg_usart_rx, dbg_usart_tx);
-
-    spawner
-        .spawn(led_pwm_task(LedPwm::new(
-            led_timer, led_red, led_green, led_blue,
-        )))
-        .unwrap();
-
-    let spi_config: SpiConfig = Default::default();
-    let spi_bus = Spi::new_blocking(rf_spi, rf_sck, rf_mosi, rf_miso, spi_config);
-    let spi_device = ExclusiveDevice::new_no_delay(spi_bus, rf_cs).unwrap();
-    let mut radio = Rfm69::new(spi_device);
-    radio.mode(rfm69::registers::Mode::Sleep).unwrap();
-    radio.frequency(915_000_000).unwrap();
-    // TODO More radio setup
-
-
-}
-
-struct LedPwm {
-    pwm: SimplePwm<'static, LedTimer>,
-}
-
-impl LedPwm {
-    pub fn new(
-        timer: LedTimer,
-        led_red: PwmPin<'static, LedTimer, Ch1>,
-        led_green: PwmPin<'static, LedTimer, Ch2>,
-        led_blue: PwmPin<'static, LedTimer, Ch4>,
-    ) -> Self {
-        Self {
-            pwm: SimplePwm::new(
-                timer,
-                Some(led_red),
-                Some(led_green),
-                None,
-                Some(led_blue),
-                Hertz(1000),
-                CountingMode::EdgeAlignedUp,
-            ),
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn led_pwm_task(led_pwm: LedPwm) {
-    defmt::info!("led_pwm_task started");
-
-    let mut channels = led_pwm.pwm.split();
-    channels.ch1.set_duty_cycle_fraction(127, 255);
-    channels.ch2.set_duty_cycle_fraction(127, 255);
-    channels.ch4.set_duty_cycle_fraction(127, 255);
-}
-
-static mut DBG_USART_PTR: Cell<*mut BufferedUart<'static>> = Cell::new(core::ptr::null_mut());
-
-fn spawn_dbg(
-    spawner: Spawner,
-    usart: DbgUsart,
-    rx: impl RxPin<DbgUsart>,
-    tx: impl TxPin<DbgUsart>,
-) {
-    let mut dbg_config = UsartConfig::default();
-    dbg_config.baudrate = 230400;
-
-    static mut DBG_TX_BUFFER: [u8; 128] = [0u8; 128];
-    static mut DBG_RX_BUFFER: [u8; 128] = [0u8; 128];
-    unsafe {
-        DBG_USART_PTR.set(singleton!(DBG_USART: BufferedUart =
-            BufferedUart::new(usart, Irqs, rx, tx, DBG_TX_BUFFER.as_mut_slice(), DBG_RX_BUFFER.as_mut_slice(), dbg_config).unwrap())
-        .unwrap());
-    }
-
-    spawner.spawn(dbg_task()).unwrap();
-}
-
-#[embassy_executor::task]
-async fn dbg_task() {
-    defmt::info!("dbg_task started");
-
-    let usart_dbg = unsafe {
-        DBG_USART_PTR
-            .replace(core::ptr::null_mut())
-            .as_mut()
-            .unwrap()
-    };
-    loop {
-        let _ = embedded_io_async::Write::write_all(usart_dbg, b"AUNISOMA> ").await;
-        Timer::after(Duration::from_millis(100)).await;
-    }
-}
-
-static mut STATUS_LEDS_PTR: *mut StatusLEDs = core::ptr::null_mut();
-
-pub struct StatusLEDs {
-    leds: [Output<'static>; 4],
-}
-
-unsafe impl Sync for StatusLEDs {}
-
-impl StatusLEDs {
-    pub fn set(which: usize) {
-        let leds = unsafe { STATUS_LEDS_PTR.as_mut().unwrap() };
-        leds.leds[which].set_level(Level::High);
-    }
-
-    pub fn reset(which: usize) {
-        let leds = unsafe { STATUS_LEDS_PTR.as_mut().unwrap() };
-        leds.leds[which].set_level(Level::Low);
-    }
+    ));
+    spawner.must_spawn(lights_task(led_timer, led_red, led_green, led_blue));
+    spawner.must_spawn(radio_task(
+        rf_spi, rf_sck, rf_mosi, rf_miso, rf_cs, rf_int, rf_rst,
+    ));
+    spawner.must_spawn(usb_task(p.USB, usb_pullup, usb_dp, usb_dm));
 }
