@@ -5,6 +5,7 @@ use core::{panic::PanicInfo, sync::atomic::AtomicI8};
 
 use embassy_executor::Spawner;
 use embassy_time::Timer;
+use defmt::println;
 // use panic_itm as _;
 #[cfg(feature = "use-itm")]
 use defmt_itm as _;
@@ -13,8 +14,18 @@ use defmt_rtt as _;
 use status_leds::StatusLEDs;
 // use panic_halt as _;
 
+#[link_section = ".noinit"]
+static mut BOOT_COUNT: u8 = 0;
+
+static mut IS_WARM_BOOT: bool = false;
+#[link_section = ".noinit"]
+static mut BOOT_MAGIC: u32 = 0;
+const BOOT_MAGIC_VALUE: u32 = 0xdeadbeef;
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    check_boot_status();
+
     #[cfg(feature = "use-itm")]
     {
         let cp = cortex_m::Peripherals::take().unwrap();
@@ -27,6 +38,9 @@ async fn main(spawner: Spawner) {
 
     board::init(spawner).await;
 
+    let app = App::new();
+    app.run().await;
+
     loop {
         StatusLEDs::set(3);
         Timer::after_millis(100).await;
@@ -35,15 +49,62 @@ async fn main(spawner: Spawner) {
     }
 }
 
+fn check_boot_status() {
+    // SAFETY: We just booted so there aren't any threads
+    unsafe {
+        BOOT_COUNT = BOOT_COUNT.wrapping_add(1);
+        // Disallow zero so we can use it as a sentinel value
+        if BOOT_COUNT == 0 {
+            BOOT_COUNT = 1;
+        }
+
+        if BOOT_MAGIC == BOOT_MAGIC_VALUE {
+            IS_WARM_BOOT = true;
+        } else {
+            IS_WARM_BOOT = false;
+            BOOT_MAGIC = BOOT_MAGIC_VALUE;
+        }
+    }
+}
+
+enum Mode {
+    Master,
+    Panel,
+    Spy,
+}
+
+pub struct Address(u8);
+
+struct App {
+    mode: Mode,
+    my_id: Address,
+}
+
+impl App {
+    fn new() -> Self {
+        Self {
+            mode: Mode::Panel,
+            my_id: get_my_id(),
+        }
+    }
+
+    async fn run(&self) {
+        loop {
+            Timer::after_millis(100).await;
+        }
+    }
+}
+
+fn get_my_id() -> Address {
+    let (data0, data1) = flash::get_user_bytes();
+    println!("data: {:?}", (data0, data1));
+    Address(data0)
+}
+
 #[inline(never)]
 #[panic_handler] // built-in ("core") attribute
 fn core_panic(info: &PanicInfo) -> ! {
-    defmt::error!("Panic: {}", info);
-    loop {}
-}
-
-#[defmt::panic_handler]
-fn defmt_panic() -> ! {
+    defmt::error!("Panic: {:?}", info);
     loop {}
 }
 
@@ -97,6 +158,7 @@ extern "Rust" fn _embassy_trace_executor_idle(executor_id: u32) {
 mod blinker;
 mod board;
 mod debug_port;
+mod flash;
 mod lights;
 mod logger;
 mod panel_bus;
