@@ -7,6 +7,6 @@ target = "thumbv7m-none-eabi"
 rustflags = ["-Clink-args=-Map=target/app.map", "-C", "link-arg=-Tdefmt.x"]
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "info"
 
 # Link scripts are set in build.rs
