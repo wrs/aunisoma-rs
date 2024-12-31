@@ -2,7 +2,7 @@ use core::convert::Infallible;
 
 use crate::board::{RadioMiso, RadioMos, RadioSck, RadioSpi};
 use embassy_stm32::{
-    gpio::{Input, Output},
+    gpio::{Flex, Output},
     mode::Blocking,
     spi::{Config as SpiConfig, Spi},
 };
@@ -26,10 +26,11 @@ pub(crate) async fn radio_task(
     rf_mosi: RadioMos,
     rf_miso: RadioMiso,
     rf_cs: Output<'static>,
-    rf_int: Input<'static>,
+    rf_int: Flex<'static>,
     rf_rst: Output<'static>,
 ) {
-    let mut radio = setup_radio(rf_spi, rf_sck, rf_mosi, rf_miso, rf_cs, rf_int, rf_rst).await.unwrap();
+    let mut radio = setup_radio(rf_spi, rf_sck, rf_mosi, rf_miso, rf_cs, rf_rst).await.unwrap();
+
     radio.send(b"Hello, world!").unwrap();
 }
 
@@ -41,12 +42,12 @@ async fn setup_radio(
     rf_mosi: RadioMos,
     rf_miso: RadioMiso,
     rf_cs: Output<'static>,
-    rf_int: Input<'static>,
     mut rf_rst: Output<'static>,
 ) -> Result<Rfm69<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>>, Rfm69Error> {
     let spi_config: SpiConfig = Default::default();
-    let spi_bus = Spi::new_blocking(rf_spi, rf_sck, rf_mosi, rf_miso, spi_config);
-    let spi_device = ExclusiveDevice::new_no_delay(spi_bus, rf_cs).unwrap();
+    let spi_driver = Spi::new_blocking(rf_spi, rf_sck, rf_mosi, rf_miso, spi_config);
+    let spi_device = ExclusiveDevice::new_no_delay(spi_driver, rf_cs).unwrap();
+
     let mut radio = Rfm69::new(spi_device);
 
     // 7.2.2. Manual Reset Pin
@@ -59,9 +60,6 @@ async fn setup_radio(
     rf_rst.set_low();
     Timer::after_millis(5).await;
 
-    for (index, val) in radio.read_all_regs().unwrap().iter().enumerate() {
-        defmt::println!("{}: {}", index, val);
-    }
     // See if the radio exists
     let version = radio.read(registers::Registers::Version)?;
     if version == 0 {

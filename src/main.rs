@@ -1,11 +1,17 @@
 #![no_std]
 #![no_main]
 
+use crate::blinker::blinker_task;
+use crate::debug_port::debug_port_task;
+use crate::lights::lights_task;
+use crate::panel_bus::panel_bus_task;
+use crate::radio::radio_task;
+use crate::usb::usb_task;
 use core::{panic::PanicInfo, sync::atomic::AtomicI8};
-
-use embassy_executor::Spawner;
-use embassy_time::Timer;
 use defmt::println;
+use embassy_executor::Spawner;
+use embassy_stm32::{gpio::Input, time::Hertz};
+use embassy_time::Timer;
 // use panic_itm as _;
 #[cfg(feature = "use-itm")]
 use defmt_itm as _;
@@ -22,6 +28,10 @@ static mut IS_WARM_BOOT: bool = false;
 static mut BOOT_MAGIC: u32 = 0;
 const BOOT_MAGIC_VALUE: u32 = 0xdeadbeef;
 
+// NOTE: Using Executor requires debugging with connect-under-reset.
+// See "wfe interfering with RTT and flashing"
+// https://github.com/embassy-rs/embassy/issues/1742
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     check_boot_status();
@@ -36,9 +46,46 @@ async fn main(spawner: Spawner) {
 
     defmt::info!("Main task started");
 
-    board::init(spawner).await;
+    let board = board::take();
 
-    let app = App::new();
+    StatusLEDs::init(board.status_leds);
+
+    spawner.must_spawn(blinker_task());
+    spawner.must_spawn(debug_port_task(
+        board.dbg_usart,
+        board.dbg_usart_rx,
+        board.dbg_usart_tx,
+    ));
+    spawner.must_spawn(panel_bus_task(
+        board.panel_bus_usart,
+        board.panel_bus_usart_tx,
+        board.panel_bus_usart_tx_dma,
+        board.panel_bus_usart_rx_dma,
+        board.ser_out_en,
+    ));
+    spawner.must_spawn(lights_task(
+        board.led_timer,
+        board.led_strip.red,
+        board.led_strip.green,
+        board.led_strip.blue,
+    ));
+    spawner.must_spawn(radio_task(
+        board.rf_spi,
+        board.rf_sck,
+        board.rf_mosi,
+        board.rf_miso,
+        board.rf_cs,
+        board.rf_int,
+        board.rf_rst,
+    ));
+    spawner.must_spawn(usb_task(
+        board.usb,
+        board.usb_pullup,
+        board.usb_dp,
+        board.usb_dm,
+    ));
+
+    let app = App::new(board.pir_1, board.pir_2);
     app.run().await;
 
     loop {
@@ -78,13 +125,17 @@ pub struct Address(u8);
 struct App {
     mode: Mode,
     my_id: Address,
+    pir_1: Input<'static>,
+    pir_2: Input<'static>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(pir_1: Input<'static>, pir_2: Input<'static>) -> Self {
         Self {
             mode: Mode::Panel,
             my_id: get_my_id(),
+            pir_1,
+            pir_2,
         }
     }
 

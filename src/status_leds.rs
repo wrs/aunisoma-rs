@@ -4,14 +4,17 @@ use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 
 pub struct StatusLEDs {
-    pub(crate) leds: [Output<'static>; 4],
+    pub leds: [Output<'static>; 4],
 }
 
-pub(crate) static STATUS_LEDS: Mutex<ThreadModeRawMutex, RefCell<Option<StatusLEDs>>> =
+static STATUS_LEDS: Mutex<ThreadModeRawMutex, RefCell<Option<StatusLEDs>>> =
     Mutex::new(RefCell::new(None));
 
 impl StatusLEDs {
-    pub fn init(leds: [Output<'static>; 4]) {
+    pub fn init(mut leds: [Output<'static>; 4]) {
+        for led in leds.iter_mut() {
+            led.set_low();
+        }
         STATUS_LEDS.lock(|cell| cell.replace(Some(StatusLEDs { leds })));
     }
 
