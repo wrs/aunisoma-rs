@@ -10,7 +10,7 @@ use crate::usb::usb_task;
 use core::{panic::PanicInfo, sync::atomic::AtomicI8};
 use defmt::println;
 use embassy_executor::Spawner;
-use embassy_stm32::{gpio::Input, time::Hertz};
+use embassy_stm32::gpio::Input;
 use embassy_time::Timer;
 // use panic_itm as _;
 #[cfg(feature = "use-itm")]
@@ -212,6 +212,7 @@ mod debug_port;
 mod flash;
 mod lights;
 mod logger;
+mod master;
 mod panel_bus;
 mod radio;
 mod status_leds;
