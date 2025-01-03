@@ -120,6 +120,6 @@ pub fn take() -> Board {
         usb_dp: p.PA12,
         usb_dm: p.PA11,
         usb_pullup: Output::new(p.PA15, Level::High, Speed::VeryHigh),
-        user_btn: Input::new(p.PA8, Pull::Up),
+        user_btn: Input::new(p.PA8, Pull::Down),
     }
 }

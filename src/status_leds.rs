@@ -38,4 +38,16 @@ impl StatusLEDs {
     pub fn reset(which: usize) {
         StatusLEDs::with_leds(|leds| leds.leds[which].set_low());
     }
+
+    pub fn set_all(value: u8) {
+        StatusLEDs::with_leds(|leds| {
+            for i in 0..4 {
+                if value & (1 << i) != 0 {
+                    leds.leds[i].set_high();
+                } else {
+                    leds.leds[i].set_low();
+                }
+            }
+        });
+    }
 }

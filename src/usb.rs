@@ -1,5 +1,6 @@
 use crate::board::{UsbDm, UsbDp};
-use defmt::{error, info, warn, Format};
+use crate::master;
+use defmt::info;
 use embassy_futures::join::join;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::USB;
@@ -8,6 +9,7 @@ use embassy_stm32::{bind_interrupts, peripherals, usb};
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm;
 use embassy_usb::{Builder, UsbDevice};
+use embedded_io_async::Write;
 use heapless::Vec;
 
 bind_interrupts!(struct Irqs {
@@ -39,16 +41,16 @@ pub async fn usb_task(usb: USB, mut usb_pullup: Output<'static>, usb_dp: UsbDp, 
     config.device_protocol = 0x01;
     config.max_packet_size_0 = MAX_PACKET_SIZE;
 
-    let mut device_descriptor: [u8; 256] = [0; 256];
-    let mut config_descriptor: [u8; 256] = [0; 256];
+    let mut config_descriptor: [u8; 64] = [0; 64];
+    let mut bos_descriptor: [u8; 16] = [0; 16];
     let mut control_buf: [u8; MAX_PACKET_SIZE as usize] = [0; MAX_PACKET_SIZE as usize];
     let mut serial_state: cdc_acm::State = cdc_acm::State::new();
 
     let mut builder = Builder::new(
         driver,
         config,
-        &mut device_descriptor,
         &mut config_descriptor,
+        &mut bos_descriptor,
         &mut [], // no msos descriptors
         &mut control_buf,
     );
@@ -65,40 +67,90 @@ async fn driver_task<'a>(mut device: UsbDevice<'a, Driver<'a, USB>>) {
     device.run().await;
 }
 
+struct CdcWriter<'s, 'a> {
+    sender: &'s mut cdc_acm::Sender<'a, Driver<'a, USB>>,
+}
+
+impl<'s, 'a> CdcWriter<'s, 'a> {
+    fn new(sender: &'s mut cdc_acm::Sender<'a, Driver<'a, USB>>) -> Self {
+        CdcWriter { sender }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone, defmt::Format)]
+pub enum CdcWriterError {
+    Other,
+}
+
+impl embedded_io::Error for CdcWriterError {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
+    }
+}
+
+impl<'w, 'a> embedded_io::ErrorType for CdcWriter<'w, 'a> {
+    type Error = CdcWriterError;
+}
+
+impl<'w, 'a> Write for CdcWriter<'w, 'a> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        match self.sender.write_packet(buf).await {
+            Ok(_) => Ok(buf.len()),
+            Err(_) => Err(CdcWriterError::Other),
+        }
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        let mut buf = buf;
+        for chunk in buf.chunks(MAX_PACKET_SIZE as usize - 1) {
+            match self.write(chunk).await {
+                Ok(0) => core::panic!("write() returned Ok(0)"),
+                Ok(n) => buf = &buf[n..],
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
 struct CommandTask<'a> {
-    class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>,
+    sender: cdc_acm::Sender<'a, Driver<'a, USB>>,
+    receiver: cdc_acm::Receiver<'a, Driver<'a, USB>>,
 }
 
 impl<'a> CommandTask<'a> {
     fn new(class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>) -> Self {
-        Self { class }
+        let (sender, receiver) = class.split();
+        Self { sender, receiver }
     }
 
     async fn run(&mut self) {
         loop {
-            self.class.wait_connection().await;
+            self.sender.wait_connection().await;
             info!("USB connected");
-
-            let mut reader = LineBreaker::<128>::new();
-            let mut buf = [0; MAX_PACKET_SIZE as usize];
-            while let Ok(n) = self.class.read_packet(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                let result = reader.process(&buf[..n]).await;
-                if let Some(line) = result {
-                    info!("data: {:?}", core::str::from_utf8(line).unwrap());
-                    for chunk in line.chunks(MAX_PACKET_SIZE as usize - 1) {
-                        if let Err(e) = self.class.write_packet(chunk).await {
-                            error!("USB error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            }
-
+            self.run_inner().await;
             info!("USB disconnected");
         }
+    }
+
+    async fn run_inner(&mut self) {
+        let mut reader = LineBreaker::<128>::new();
+        let mut buf = [0; MAX_PACKET_SIZE as usize];
+        while let Ok(n) = self.receiver.read_packet(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            let result = reader.process(&buf[..n]).await;
+            if let Some(line) = result {
+                master::handle_command(line, &mut CdcWriter::new(&mut self.sender)).await;
+            }
+        }
+
+        info!("USB disconnected");
     }
 }
 
@@ -117,10 +169,19 @@ impl<const N: usize> LineBreaker<N> {
         }
     }
 
-    // This works best if buf is at least 2*MAX_PACKET_SIZE
+    /// Keep calling process() with chunks of input. It returns None if it needs
+    /// more, or Some(line) if it found a line.
+    ///
+    /// Works best if buf is at least 2*MAX_PACKET_SIZE. Otherwise it may drop
+    /// the line after an over-long line.
 
     async fn process(&mut self, buf: &[u8]) -> Option<&[u8]> {
-        info!("buf: {} used_prefix: {} discard: {}", core::str::from_utf8(buf).unwrap(), self.used_prefix, self.discard);
+        // info!(
+        //     "buf: {} used_prefix: {} discard: {}",
+        //     core::str::from_utf8(buf).unwrap(),
+        //     self.used_prefix,
+        //     self.discard
+        // );
         if self.used_prefix > 0 {
             let len = self.buffer.len();
             self.buffer.copy_within(self.used_prefix..len, 0);
@@ -136,9 +197,9 @@ impl<const N: usize> LineBreaker<N> {
         // We know buf is not empty, so unwrap is safe
         let first = split.next().unwrap();
         let rest = split.next();
-        info!("first={:?} rest={:?}", first, rest);
 
         if let Some(rest) = rest {
+            // Found a line ending
             if self.discard {
                 // Discard the (partial) current line
                 self.buffer.clear();
