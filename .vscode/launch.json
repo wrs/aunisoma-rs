@@ -23,7 +23,7 @@
                 "reset_config srst_only srst_nogate connect_assert_srst"
             ],
             "cwd": "${workspaceRoot}",
-            "runToEntryPoint": "main",
+            // "runToEntryPoint": "main",
             "executable": "./target/thumbv7m-none-eabi/debug/${workspaceFolderBasename}",
             "device": "STM32F103C8",
             "configFiles": [
