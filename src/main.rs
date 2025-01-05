@@ -7,8 +7,9 @@ use crate::lights::lights_task;
 use crate::panel_bus::panel_bus_task;
 use crate::radio::radio_task;
 use crate::usb::usb_task;
+use comm::{Address, Comm};
 use core::{panic::PanicInfo, sync::atomic::AtomicI8};
-use defmt::{info, println};
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Input;
 use embassy_time::Timer;
@@ -47,7 +48,7 @@ async fn main(spawner: Spawner) {
 
     defmt::info!("Main task started");
 
-    let board = board::take();
+    let board = board::hookup();
 
     StatusLEDs::init(board.status_leds);
 
@@ -60,28 +61,38 @@ async fn main(spawner: Spawner) {
         board.dbg_usart_rx,
         board.dbg_usart_tx,
     ));
-    spawner.must_spawn(panel_bus_task(
-        board.panel_bus_usart,
-        board.panel_bus_usart_tx,
-        board.panel_bus_usart_tx_dma,
-        board.panel_bus_usart_rx_dma,
-        board.ser_out_en,
-    ));
     spawner.must_spawn(lights_task(
         board.led_timer,
         board.led_strip.red,
         board.led_strip.green,
         board.led_strip.blue,
     ));
-    spawner.must_spawn(radio_task(
+
+    let comm: &mut dyn Comm;
+
+    if let Ok(radio) = radio::setup_radio(
         board.rf_spi,
         board.rf_sck,
         board.rf_mosi,
         board.rf_miso,
         board.rf_cs,
-        board.rf_int,
         board.rf_rst,
-    ));
+    )
+    .await
+    {
+        spawner.must_spawn(radio_task(radio, board.rf_int));
+        comm = &mut radio;
+    } else {
+        defmt::error!("Radio setup failed");
+
+        spawner.must_spawn(panel_bus_task(
+            board.panel_bus_usart,
+            board.panel_bus_usart_tx,
+            board.panel_bus_usart_tx_dma,
+            board.panel_bus_usart_rx_dma,
+            board.ser_out_en,
+        ));
+    }
     spawner.must_spawn(usb_task(
         board.usb,
         board.usb_pullup,
@@ -125,6 +136,11 @@ pub fn is_warm_boot() -> bool {
     unsafe { IS_WARM_BOOT }
 }
 
+pub fn get_boot_count() -> u8 {
+    // Safety: This is only written once at boot time.
+    unsafe { BOOT_COUNT }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Mode {
@@ -132,9 +148,6 @@ pub enum Mode {
     Panel = 2,
     Spy = 3,
 }
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Address(u8);
 
 struct App {
     mode: Mode,
@@ -297,13 +310,16 @@ extern "Rust" fn _embassy_trace_executor_idle(executor_id: u32) {
 
 mod blinker;
 mod board;
+mod comm;
 mod debug_port;
 mod flash;
 mod lights;
 mod logger;
 mod master;
+mod panel;
 mod panel_bus;
 mod radio;
+mod ring_buffer;
 mod status_leds;
 mod usb;
 mod version;

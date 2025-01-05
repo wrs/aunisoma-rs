@@ -15,7 +15,9 @@ pub type LedTimer = TIM2;
 pub type RadioSpi = SPI1;
 pub type RadioSck = peripherals::PA5;
 pub type RadioMiso = peripherals::PA6;
-pub type RadioMos = peripherals::PA7;
+pub type RadioMosi = peripherals::PA7;
+pub type RadioInt = peripherals::PB11;
+pub type RadioExti = peripherals::EXTI11; // really EXTI15_10
 pub type UsbDp = peripherals::PA12;
 pub type UsbDm = peripherals::PA11;
 
@@ -26,36 +28,37 @@ pub struct LedStrip {
 }
 
 pub struct Board {
-    pub dbg_usart: USART1,
-    pub dbg_usart_rx: peripherals::PA10,
-    pub dbg_usart_tx: peripherals::PA9,
-    pub panel_bus_usart: USART2,
+    pub dbg_usart: DbgUsart,
+    pub dbg_usart_rx: DbgUsartRx,
+    pub dbg_usart_tx: DbgUsartTx,
+    pub panel_bus_usart: PanelBusUsart,
     pub panel_bus_usart_tx: peripherals::PA2,
-    pub panel_bus_usart_tx_dma: peripherals::DMA1_CH7,
-    pub panel_bus_usart_rx_dma: peripherals::DMA1_CH6,
+    pub panel_bus_usart_tx_dma: PanelBusUsartTxDma,
+    pub panel_bus_usart_rx_dma: PanelBusUsartRxDma,
     pub led_strip: LedStrip,
     pub status_leds: [Output<'static>; 4],
-    pub led_timer: TIM2,
+    pub led_timer: LedTimer,
     pub pir_1: Input<'static>,
     pub pir_2: Input<'static>,
     pub rf_cs: Output<'static>,
-    pub rf_int: Flex<'static>,
+    pub rf_int: RadioInt,
+    pub rf_exti: RadioExti,
     pub rf_rst: Output<'static>,
-    pub rf_spi: SPI1,
-    pub rf_sck: peripherals::PA5,
-    pub rf_miso: peripherals::PA6,
-    pub rf_mosi: peripherals::PA7,
+    pub rf_spi: RadioSpi,
+    pub rf_sck: RadioSck,
+    pub rf_miso: RadioMiso,
+    pub rf_mosi: RadioMosi,
     pub ser_out_en: Output<'static>,
     pub usb: peripherals::USB,
-    pub usb_dp: peripherals::PA12,
-    pub usb_dm: peripherals::PA11,
+    pub usb_dp: UsbDp,
+    pub usb_dm: UsbDm,
     pub usb_pullup: Output<'static>,
     pub user_btn: Input<'static>,
 }
 
 #[allow(unused_variables)]
 #[inline(never)]
-pub fn take() -> Board {
+pub fn hookup() -> Board {
     let mut config = embassy_stm32::Config::default();
     {
         use embassy_stm32::rcc::*;
@@ -109,7 +112,8 @@ pub fn take() -> Board {
         pir_1: Input::new(p.PB10, Pull::Up),
         pir_2: Input::new(p.PB2, Pull::Up),
         rf_cs: Output::new(p.PB0, Level::High, Speed::VeryHigh),
-        rf_int: Flex::new(p.PB11),
+        rf_int: p.PB11,
+        rf_exti: p.EXTI11,
         rf_rst: Output::new(p.PB1, Level::High, Speed::VeryHigh),
         rf_spi: p.SPI1,
         rf_sck: p.PA5,

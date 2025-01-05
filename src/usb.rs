@@ -1,4 +1,5 @@
 use crate::board::{UsbDm, UsbDp};
+use crate::comm::BROADCAST_ADDRESS;
 use crate::master;
 use defmt::info;
 use embassy_futures::join::join;
@@ -59,7 +60,8 @@ pub async fn usb_task(usb: USB, mut usb_pullup: Output<'static>, usb_dp: UsbDp, 
 
     let usb = builder.build();
 
-    let mut command_task = CommandTask::new(class);
+    let master = master::Master::new(BROADCAST_ADDRESS, &mut comm);
+    let mut command_task = CommandTask::new(class, master);
     join(driver_task(usb), command_task.run()).await;
 }
 
@@ -120,12 +122,17 @@ impl<'w, 'a> Write for CdcWriter<'w, 'a> {
 struct CommandTask<'a> {
     sender: cdc_acm::Sender<'a, Driver<'a, USB>>,
     receiver: cdc_acm::Receiver<'a, Driver<'a, USB>>,
+    master: master::Master<'a>,
 }
 
 impl<'a> CommandTask<'a> {
-    fn new(class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>) -> Self {
+    fn new(class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>, master: master::Master<'a>) -> Self {
         let (sender, receiver) = class.split();
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            master,
+        }
     }
 
     async fn run(&mut self) {
@@ -146,7 +153,7 @@ impl<'a> CommandTask<'a> {
             }
             let result = reader.process(&buf[..n]).await;
             if let Some(line) = result {
-                master::handle_command(line, &mut CdcWriter::new(&mut self.sender)).await;
+                self.master.handle_command(line, &mut CdcWriter::new(&mut self.sender)).await;
             }
         }
 
