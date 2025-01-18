@@ -21,7 +21,7 @@ embedded-io = "0.6.1"
 embedded-io-async = "0.6.1"
 embedded-storage = "0.3.1"
 
-embassy-executor = { path = "../embassy/embassy-executor", features = [
+embassy-executor = { version = "0.7.0", features = [
     "task-arena-size-4096",
     "arch-cortex-m",
     "executor-thread",
@@ -29,16 +29,17 @@ embassy-executor = { path = "../embassy/embassy-executor", features = [
     "defmt",
     # "trace",
 ] }
-embassy-stm32 = { path = "../embassy/embassy-stm32", features = [
+embassy-stm32 = { version = "0.2.0", features = [
     "stm32f103c8",
+    "exti",
     "memory-x",
     "time-driver-any",
     "unstable-pac",
     "defmt",
 ] }
-embassy-sync = { path = "../embassy/embassy-sync" }
-embassy-time = { path = "../embassy/embassy-time" }
-embassy-usb = { version = "0.3.0", features = ["defmt"] }
+embassy-sync = { version = "0.6.2" }
+embassy-time = { version = "0.4.0" }
+embassy-usb = { version = "0.4.0", features = ["defmt"] }
 
 cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.3"
