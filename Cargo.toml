@@ -33,12 +33,13 @@ embassy-stm32 = { version = "0.2.0", features = [
     "stm32f103c8",
     "exti",
     "memory-x",
+    "rt",
     "time-driver-any",
     "unstable-pac",
     "defmt",
 ] }
 embassy-sync = { version = "0.6.2" }
-embassy-time = { version = "0.4.0" }
+embassy-time = { version = "0.4.0", features = ["tick-hz-10_000"] }
 embassy-usb = { version = "0.4.0", features = ["defmt"] }
 
 cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
@@ -55,6 +56,11 @@ defmt-rtt = { version = "0.4.1", optional = true }
 embassy-futures = "0.1.1"
 futures = { version = "0.3.31", default-features = false, features = [] }
 num_enum = { version = "0.7.3", default-features = false, features = [] }
+async-trait = "0.1.85"
+
+# change lint defaults
+[lints.rust]
+elided-lifetimes-in-paths = "deny"
 
 [profile.dev]
 opt-level = "z"
@@ -65,5 +71,5 @@ codegen-units = 1 # better optimizations
 debug = true      # symbols are nice and they don't increase the size on Flash
 lto = true        # better optimizations
 
-[patch.crates-io]
-embassy-usb-driver = { path = "../embassy/embassy-usb-driver" }
+# [patch.crates-io]
+# embassy-usb-driver = { path = "../embassy/embassy-usb-driver" }

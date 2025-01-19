@@ -1,7 +1,8 @@
 use crate::comm::{Address, Comm, BROADCAST_ADDRESS, MAX_PAYLOAD_SIZE};
 use crate::{flash, version, Mode};
-use core::fmt::Write;
 use defmt::info;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as AsyncWrite;
 use heapless::Vec;
@@ -177,12 +178,12 @@ impl<'a> Message<'a> {
 
 pub struct Master<'a> {
     my_address: Address,
-    comm: &'a mut dyn Comm,
+    comm: &'a mut Comm<'a>,
     panels: Vec<PanelInfo, MAX_PANEL_SLOTS>,
 }
 
-impl<'a> Master<'a> {
-    pub fn new(my_address: Address, comm: &'a mut dyn Comm) -> Self {
+impl<'comm> Master<'comm> {
+    pub fn new(my_address: Address, comm: &'comm mut Comm<'comm>) -> Self {
         Self {
             my_address,
             comm,
@@ -199,12 +200,13 @@ impl<'a> Master<'a> {
     async fn await_replies(&mut self, timeout_ms: u64) {
         let start = embassy_time::Instant::now();
         while start.elapsed() < Duration::from_millis(timeout_ms) {
-            if let Some(data) = self.comm.recv() {
-                let rssi_master = self.comm.last_rssi();
-                if let Some((from, msg)) = Message::parse(data) {
-                    Self::handle_reply(rssi_master, &mut self.panels, from, msg).await;
-                }
-            }
+            todo!()
+            // if let Some(data) = self.comm.recv() {
+            //     let rssi_master = 0; // TODO self.comm.last_rssi();
+            //     if let Some((from, msg)) = Message::parse(data) {
+            //         Self::handle_reply(rssi_master, &mut self.panels, from, msg).await;
+            //     }
+            // }
         }
     }
 
@@ -249,11 +251,7 @@ impl<'a> Master<'a> {
         }
     }
 
-    pub async fn handle_command(
-        &mut self,
-        command: &[u8],
-        response: &mut (impl AsyncWrite + Write),
-    ) {
+    pub async fn handle_command(&mut self, command: &[u8], response: &mut impl AsyncWrite) {
         if command.is_empty() {
             response.write_all(b"?").await.unwrap();
         } else {
@@ -275,7 +273,7 @@ impl<'a> Master<'a> {
         response.write_all(b"\r\n").await.unwrap();
     }
 
-    async fn set_default_mode(&mut self, args: &[u8], response: &mut (impl AsyncWrite + Write)) {
+    async fn set_default_mode(&mut self, args: &[u8], response: &mut impl AsyncWrite) {
         info!("set_default_mode {}", core::str::from_utf8(args).unwrap());
         let mode = match args.first() {
             Some(b'M') => Mode::Master,
@@ -288,7 +286,7 @@ impl<'a> Master<'a> {
         cortex_m::peripheral::SCB::sys_reset();
     }
 
-    async fn enumerate(&mut self, _args: &[u8], response: &mut (impl AsyncWrite + Write)) {
+    async fn enumerate(&mut self, _args: &[u8], response: &mut impl AsyncWrite) {
         info!("enumerate");
         self.panels.clear();
 
@@ -298,29 +296,30 @@ impl<'a> Master<'a> {
             self.await_replies(500).await;
         }
 
+        todo!();
         // Format response as JSON array
-        let mut w = heapless::String::<256>::new();
-        write!(w, "[").unwrap();
-        for (i, panel) in self.panels.iter().enumerate() {
-            if i > 0 {
-                write!(w, ", ").unwrap();
-            }
-            write!(
-                w,
-                "{{\"id\":{}, \"bootCount\":{}, \"rssiM\":{}, \"rssiP\":{}}}",
-                panel.id.value(),
-                panel.boot_count,
-                panel.rssi_master,
-                panel.rssi_panel
-            )
-            .unwrap();
-        }
-        write!(w, "]").unwrap();
+        // let mut w = heapless::String::<256>::new();
+        // write!(w, "[").unwrap();
+        // for (i, panel) in self.panels.iter().enumerate() {
+        //     if i > 0 {
+        //         write!(w, ", ").unwrap();
+        //     }
+        //     write!(
+        //         w,
+        //         "{{\"id\":{}, \"bootCount\":{}, \"rssiM\":{}, \"rssiP\":{}}}",
+        //         panel.id.value(),
+        //         panel.boot_count,
+        //         panel.rssi_master,
+        //         panel.rssi_panel
+        //     )
+        //     .unwrap();
+        // }
+        // write!(w, "]").unwrap();
 
-        response.write_all(w.as_bytes()).await.unwrap();
+        // response.write_all(w.as_bytes()).await.unwrap();
     }
 
-    async fn set_colors(&mut self, args: &[u8], response: &mut (impl AsyncWrite + Write)) {
+    async fn set_colors(&mut self, args: &[u8], response: &mut impl AsyncWrite) {
         info!("set_colors");
         if args.len() % 6 != 0 {
             return response.write_all(b"?").await.unwrap();
@@ -342,22 +341,24 @@ impl<'a> Master<'a> {
         self.broadcast(Message::SetColors { slots: &slots }).await;
         self.await_replies(500).await;
 
+        todo!();
         // Format response as JSON array of panel IDs that replied
-        let mut w = heapless::String::<256>::new();
-        write!(w, "[").unwrap();
-        for (i, panel) in self.panels.iter().enumerate() {
-            if i > 0 {
-                write!(w, ",").unwrap();
-            }
-            write!(w, "{}", panel.id.value()).unwrap();
-        }
-        write!(w, "]").unwrap();
+        // let mut w = heapless::String::<256>::new();
+        // write!(w, "[").unwrap();
+        // for (i, panel) in self.panels.iter().enumerate() {
+        //     if i > 0 {
+        //         write!(w, ",").unwrap();
+        //     }
+        //     write!(w, "{}", panel.id.value()).unwrap();
+        // }
+        // write!(w, "]").unwrap();
 
-        response.write_all(w.as_bytes()).await.unwrap();
+        // response.write_all(w.as_bytes()).await.unwrap();
     }
 
-    async fn map_panels(&mut self, args: &[u8], response: &mut (impl AsyncWrite + Write)) {
+    async fn map_panels(&mut self, args: &[u8], response: &mut impl AsyncWrite) {
         info!("map_panels");
+        todo!();
         if args.len() % 2 != 0 || args.len() > MAX_PANEL_SLOTS * 2 {
             return response.write_all(b"?").await.unwrap();
         }
@@ -397,15 +398,16 @@ impl<'a> Master<'a> {
             response.write_all(b"PARTIAL").await.unwrap();
             for (i, &assigned) in assigned.iter().enumerate() {
                 if assigned {
-                    write!(response, " {}", i).unwrap();
+                    todo!();
+                    // write!(response, " {}", i).unwrap();
                 }
             }
         }
     }
 
-    async fn reset_all(&mut self, _args: &[u8], response: &mut (impl AsyncWrite + Write)) {
+    async fn reset_all(&mut self, _args: &[u8], response: &mut impl AsyncWrite) {
         info!("reset_all");
-
+        todo!();
         // Get current boot counts
         let mut boot_counts = heapless::Vec::<(Address, u8), MAX_PANEL_SLOTS>::new();
         self.panels.clear();
@@ -445,11 +447,11 @@ impl<'a> Master<'a> {
             if i > 0 {
                 response.write_all(b",").await.unwrap();
             }
-            write!(response, "{}", panel.id.value()).unwrap();
+            // write!(response, "{}", panel.id.value()).unwrap();
         }
     }
 
-    async fn test_message(&mut self, args: &[u8], response: &mut (impl AsyncWrite + Write)) {
+    async fn test_message(&mut self, args: &[u8], response: &mut impl AsyncWrite) {
         info!("test_message");
         let payload_size = if args.is_empty() {
             0
@@ -459,4 +461,47 @@ impl<'a> Master<'a> {
         self.broadcast(Message::Test { payload_size }).await;
         response.write_all(b"OK").await.unwrap();
     }
+
+    pub async fn run<'b>(
+        &mut self,
+        command_signal: Signal<ThreadModeRawMutex, Vec<u8, 256>>,
+        response_signal: Signal<ThreadModeRawMutex, Vec<u8, 256>>,
+    ) {
+        let mut response = WriteableVec(Vec::<u8, 256>::new());
+        loop {
+            let msg = command_signal.wait().await;
+            self.handle_command(msg.as_slice(), &mut response).await;
+            response_signal.signal(response.0.clone());
+        }
+    }
+}
+
+struct WriteableVec<const N: usize>(Vec<u8, N>);
+
+impl<const N: usize> embedded_io_async::Write for WriteableVec<N> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        match self.0.extend_from_slice(buf) {
+            Ok(()) => Ok(buf.len()),
+            Err(_) => Err(Self::Error::Overflow),
+        }
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone, defmt::Format)]
+enum WriteableVecError {
+    Overflow,
+}
+
+impl embedded_io::Error for WriteableVecError {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
+    }
+}
+
+impl<const N: usize> embedded_io::ErrorType for WriteableVec<N> {
+    type Error = WriteableVecError;
 }

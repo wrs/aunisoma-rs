@@ -1,8 +1,8 @@
 use crate::board::{UsbDm, UsbDp};
-use crate::comm::BROADCAST_ADDRESS;
-use crate::master;
+use crate::line_breaker::LineBreaker;
+use cortex_m::singleton;
 use defmt::info;
-use embassy_futures::join::join;
+use embassy_executor::Spawner;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::USB;
 use embassy_stm32::usb::Driver;
@@ -19,8 +19,13 @@ bind_interrupts!(struct Irqs {
 
 const MAX_PACKET_SIZE: u8 = 64;
 
-#[embassy_executor::task]
-pub async fn usb_task(usb: USB, mut usb_pullup: Output<'static>, usb_dp: UsbDp, usb_dm: UsbDm) {
+pub async fn init<const BUFFER_SIZE: usize>(
+    spawner: Spawner,
+    usb: USB,
+    mut usb_pullup: Output<'static>,
+    usb_dp: UsbDp,
+    usb_dm: UsbDm,
+) -> UsbSerial<'static, BUFFER_SIZE> {
     info!("USB init");
 
     // Reset the USB D+ pin to simulate a disconnect, so we don't have to
@@ -42,30 +47,44 @@ pub async fn usb_task(usb: USB, mut usb_pullup: Output<'static>, usb_dp: UsbDp, 
     config.device_protocol = 0x01;
     config.max_packet_size_0 = MAX_PACKET_SIZE;
 
-    let mut config_descriptor: [u8; 64] = [0; 64];
-    let mut bos_descriptor: [u8; 16] = [0; 16];
-    let mut control_buf: [u8; MAX_PACKET_SIZE as usize] = [0; MAX_PACKET_SIZE as usize];
-    let mut serial_state: cdc_acm::State = cdc_acm::State::new();
+    struct Resources {
+        config_descriptor: [u8; 64],
+        bos_descriptor: [u8; 16],
+        control_buf: [u8; MAX_PACKET_SIZE as usize],
+        serial_state: cdc_acm::State<'static>,
+    }
+
+    let resources = singleton!(USB_RESOURCES: Resources = Resources {
+        config_descriptor: [0; 64],
+        bos_descriptor: [0; 16],
+        control_buf: [0; MAX_PACKET_SIZE as usize],
+        serial_state: cdc_acm::State::new(),
+    }).unwrap();
 
     let mut builder = Builder::new(
         driver,
         config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
+        &mut resources.config_descriptor,
+        &mut resources.bos_descriptor,
         &mut [], // no msos descriptors
-        &mut control_buf,
+        &mut resources.control_buf,
     );
 
-    let class = cdc_acm::CdcAcmClass::new(&mut builder, &mut serial_state, MAX_PACKET_SIZE as u16);
+    let class = cdc_acm::CdcAcmClass::new(
+        &mut builder,
+        &mut resources.serial_state,
+        MAX_PACKET_SIZE as u16,
+    );
 
     let usb = builder.build();
 
-    let master = master::Master::new(BROADCAST_ADDRESS, &mut comm);
-    let mut command_task = CommandTask::new(class, master);
-    join(driver_task(usb), command_task.run()).await;
+    spawner.must_spawn(driver_task(usb));
+
+    UsbSerial::new(class)
 }
 
-async fn driver_task<'a>(mut device: UsbDevice<'a, Driver<'a, USB>>) {
+#[embassy_executor::task]
+async fn driver_task(mut device: UsbDevice<'static, Driver<'static, USB>>) {
     device.run().await;
 }
 
@@ -119,135 +138,37 @@ impl<'w, 'a> Write for CdcWriter<'w, 'a> {
     }
 }
 
-struct CommandTask<'a> {
-    sender: cdc_acm::Sender<'a, Driver<'a, USB>>,
-    receiver: cdc_acm::Receiver<'a, Driver<'a, USB>>,
-    master: master::Master<'a>,
+pub struct UsbSerial<'a, const BUFFER_SIZE: usize> {
+    breaker: LineBreaker<BUFFER_SIZE>,
+    class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>,
 }
 
-impl<'a> CommandTask<'a> {
-    fn new(class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>, master: master::Master<'a>) -> Self {
-        let (sender, receiver) = class.split();
+impl<'a, const BUFFER_SIZE: usize> UsbSerial<'a, BUFFER_SIZE> {
+    fn new(class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>) -> Self {
         Self {
-            sender,
-            receiver,
-            master,
+            breaker: LineBreaker::new(),
+            class,
         }
     }
 
-    async fn run(&mut self) {
-        loop {
-            self.sender.wait_connection().await;
-            info!("USB connected");
-            self.run_inner().await;
-            info!("USB disconnected");
-        }
-    }
-
-    async fn run_inner(&mut self) {
-        let mut reader = LineBreaker::<128>::new();
+    pub async fn read_line(&mut self, into: &mut Vec<u8, BUFFER_SIZE>) {
         let mut buf = [0; MAX_PACKET_SIZE as usize];
-        while let Ok(n) = self.receiver.read_packet(&mut buf).await {
-            if n == 0 {
-                break;
-            }
-            let result = reader.process(&buf[..n]).await;
-            if let Some(line) = result {
-                self.master.handle_command(line, &mut CdcWriter::new(&mut self.sender)).await;
-            }
-        }
-
-        info!("USB disconnected");
-    }
-}
-
-struct LineBreaker<const N: usize> {
-    buffer: Vec<u8, N>,
-    used_prefix: usize,
-    discard: bool,
-}
-
-impl<const N: usize> LineBreaker<N> {
-    fn new() -> Self {
-        Self {
-            buffer: Vec::<u8, N>::new(),
-            used_prefix: 0,
-            discard: false,
-        }
-    }
-
-    /// Keep calling process() with chunks of input. It returns None if it needs
-    /// more, or Some(line) if it found a line.
-    ///
-    /// Works best if buf is at least 2*MAX_PACKET_SIZE. Otherwise it may drop
-    /// the line after an over-long line.
-
-    async fn process(&mut self, buf: &[u8]) -> Option<&[u8]> {
-        // info!(
-        //     "buf: {} used_prefix: {} discard: {}",
-        //     core::str::from_utf8(buf).unwrap(),
-        //     self.used_prefix,
-        //     self.discard
-        // );
-        if self.used_prefix > 0 {
-            let len = self.buffer.len();
-            self.buffer.copy_within(self.used_prefix..len, 0);
-            assert!(self.buffer.resize(len - self.used_prefix, 0).is_ok());
-            self.used_prefix = 0;
-        }
-
-        if buf.len() == 0 {
-            return None;
-        }
-
-        let mut split = buf.splitn(2, |b| *b == b'\n');
-        // We know buf is not empty, so unwrap is safe
-        let first = split.next().unwrap();
-        let rest = split.next();
-
-        if let Some(rest) = rest {
-            // Found a line ending
-            if self.discard {
-                // Discard the (partial) current line
-                self.buffer.clear();
-                // Save the beginning of the next line
-                assert!(
-                    self.buffer.extend_from_slice(rest).is_ok(),
-                    "No room for line fragment"
-                );
-                self.discard = false;
-                return None;
-            }
-
-            // Save the end of the current line
-            if self.buffer.extend_from_slice(first).is_ok() {
-                let line_len = self.buffer.len();
-                if self.buffer.extend_from_slice(rest).is_ok() {
-                    // We saved the beginning of the next line, yay happy path!
-                    self.used_prefix = line_len;
-                    return Some(&self.buffer[..line_len]);
+        loop {
+            self.class.wait_connection().await;
+            let n = match self.class.read_packet(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => {
+                    info!("USB disconnected");
+                    self.breaker.reset();
+                    continue;
                 }
-                // We didn't have room for the beginning of the next line, so
-                // discard the rest of it.
-                self.discard = true;
-                self.used_prefix = line_len;
-                return Some(&self.buffer[..line_len]);
-            } else {
-                // Line too long, discard it
-                self.buffer.clear();
-                self.discard = true;
-                return None;
+            };
+            if n == 0 {
+                continue;
             }
-        } else {
-            // No line ending found, so just append the buffer
-            if self.buffer.extend_from_slice(first).is_ok() {
-                return None;
+            if let Some(line) = self.breaker.process(&buf[..n]) {
+                into.extend_from_slice(line).unwrap();
             }
-            // Line too long, discard it
-            self.buffer.clear();
-            self.discard = true;
-            return None;
         }
     }
 }
-// ********************************************************************************************************************************

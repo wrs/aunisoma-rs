@@ -1,13 +1,12 @@
 #![allow(dead_code)]
 
-use core::fmt::Write;
+use crate::comm::{Address, Comm, MAX_PAYLOAD_SIZE};
+use crate::{get_boot_count, App};
+use crate::serial::Serial;
 use defmt::info;
-use embassy_stm32::gpio::Input;
+use embassy_futures::select::select;
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
-
-use crate::get_boot_count;
-use crate::comm::{Address, MAX_PAYLOAD_SIZE};
 
 pub const MAX_PANEL_SLOTS: usize = 32;
 
@@ -178,24 +177,20 @@ impl<'a> Message<'a> {
 }
 
 pub struct Panel {
-    my_address: Address,
+    app: App,
     my_slot: Option<u8>,
-    pir1: Input<'static>,
-    pir2: Input<'static>,
 }
 
 impl Panel {
-    pub fn new(my_address: Address, pir1: Input<'static>, pir2: Input<'static>) -> Self {
+    pub fn new(app: App) -> Self {
         Self {
-            my_address,
+            app,
             my_slot: None,
-            pir1,
-            pir2,
         }
     }
 
     pub fn get_pirs(&self) -> u8 {
-        ((self.pir1.is_high() as u8) << 0) | ((self.pir2.is_high() as u8) << 1)
+        ((self.app.pir_1.is_high() as u8) << 0) | ((self.app.pir_2.is_high() as u8) << 1)
     }
 
     pub async fn handle_message(
@@ -220,7 +215,7 @@ impl Panel {
             }
             Message::MapPanels { slots } => {
                 for (i, slot) in slots.iter().enumerate() {
-                    if Address(slot.id) == self.my_address {
+                    if Address(slot.id) == self.app.address {
                         self.my_slot = Some(i as u8);
                         return Some(Message::MapPanelReply { slot: i as u8 });
                     }
@@ -244,5 +239,25 @@ impl Panel {
             _ => {}
         }
         None
+    }
+
+    pub async fn run(
+        &mut self,
+        mut serial: Serial<'static, 256>,
+        mut comm: &mut Comm<'static>,
+    ) {
+        loop {
+            let mut cmd = Vec::<u8, 256>::new();
+            serial.read_line(&mut cmd).await;
+
+            match cmd.get(0) {
+                None => continue,
+                Some(b'D') => {
+                    todo!("Change mode");
+                }
+                Some(b'V') => {}
+                _ => {}
+            }
+        }
     }
 }

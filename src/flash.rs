@@ -1,5 +1,5 @@
 use crate::{is_warm_boot, Mode};
-use defmt::{info, panic, println};
+use defmt::{debug, info, panic};
 use embassy_stm32::pac::FLASH;
 
 pub fn get_my_id() -> u8 {
@@ -95,28 +95,24 @@ fn ob_erase() {
 
 fn ob_write_data_bytes(data0: u8, data1: u8) {
     wait_for_flash_idle();
-    println!("set optpg");
     FLASH.cr().modify(|w| w.set_optpg(true));
-    println!("write data0");
     write_option_word(OB_DATA_ADDRESS_DATA0, data0 as u16);
-    println!("write data1");
     write_option_word(OB_DATA_ADDRESS_DATA1, data1 as u16);
     wait_for_flash_idle();
-    println!("set optpg false");
     FLASH.cr().modify(|w| w.set_optpg(false));
 }
 
 fn write_option_word(address: *mut u16, value: u16) {
-    println!("writing {:x} to {:x}", value, address);
+    debug!("writing {:x} to {:x}", value, address);
     unsafe {
         core::ptr::write_volatile(address, value);
     }
     wait_for_flash_idle();
     let read_value = unsafe { core::ptr::read_volatile(address) };
-    println!("read {:x} from {:x}", read_value, address);
+    debug!("read {:x} from {:x}", read_value, address);
     let expected_value = (!value << 8) | value;
     if read_value != expected_value {
-        println!("expected {:x} but got {:x}", expected_value, read_value);
+        debug!("expected {:x} but got {:x}", expected_value, read_value);
         panic!("flash write failed");
     }
 }

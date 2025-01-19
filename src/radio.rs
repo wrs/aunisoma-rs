@@ -1,21 +1,21 @@
 use crate::board::{self, RadioMosi};
-use crate::comm::ReceiveCallback;
-use crate::ring_buffer::RingBuffer;
+use crate::comm::{ReceiveCallback, BROADCAST_ADDRESS};
 use crate::{
     board::{RadioMiso, RadioSck, RadioSpi},
     comm::{Address, Comm, RxBuffer, MAX_PAYLOAD_SIZE},
 };
+use core::cell::RefCell;
 use core::convert::Infallible;
-use embassy_stm32::{bind_interrupts, interrupt};
 use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::gpio::Pull;
 use embassy_stm32::{
-    gpio::{Flex, Output},
+    gpio::{Output, Pull},
     mode::Blocking,
     spi::{Config as SpiConfig, Spi},
 };
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
+use embassy_sync::blocking_mutex;
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
+use embassy_sync::mutex::Mutex;
+use embassy_sync::zerocopy_channel::Sender;
 use embassy_time::Timer;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use heapless::Vec;
@@ -30,49 +30,76 @@ use rfm69::Rfm69;
 const FREQUENCY: u32 = 915_000_000;
 const BITRATE: u32 = 250_000;
 
-static RADIO_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
-struct Radio {
-    rfm69: Rfm69<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>>,
-    rx_ring: RingBuffer<RxBuffer, 8>,
-    address: Address,
+pub struct Radio {
     receive_callback: Option<ReceiveCallback>,
+    address: Address,
+    rfm69: blocking_mutex::Mutex<
+        NoopRawMutex,
+        RefCell<Rfm69<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>>>,
+    >,
+    last_rssi: i8,
 }
 
 #[embassy_executor::task]
-pub(crate) async fn radio_task(
-    mut radio: Radio,
+pub async fn radio_receiver_task(
+    radio: &'static Mutex<ThreadModeRawMutex, RefCell<Radio>>,
     rf_int: board::RadioInt,
     rf_exti: board::RadioExti,
+    mut radio_rx_sender: Sender<'static, ThreadModeRawMutex, RxBuffer>,
 ) {
+    let mut rf_int_pin = ExtiInput::new(rf_int, rf_exti, Pull::None);
     loop {
+        rf_int_pin.wait_for_rising_edge().await;
+        let radio = radio.lock().await;
+        let radio = radio.borrow();
+        let mut rfm69 = radio.rfm69.borrow().borrow_mut();
+        let p = radio_rx_sender.send().await;
+        if Radio::recv(&mut rfm69, radio.address, &mut p.as_mut_slice()).is_ok() {
+            radio_rx_sender.send_done();
+        }
+        // TODO
+        // radio.last_rssi = rfm69.rssi() as i8 / 2;
     }
 }
 
-#[interrupt]
-fn EXTI15_10() {
-
+pub enum RadioError {
+    Rfm69(rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>),
+    NoRadio,
+    Timeout,
+    NoPacketAvailable,
+    InvalidPacket,
 }
 
-type Rfm69Error = rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>;
-type RadioResult<T> = Result<T, Rfm69Error>;
+impl From<rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>> for RadioError {
+    fn from(e: rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>) -> Self {
+        RadioError::Rfm69(e)
+    }
+}
+
+type RadioResult<T> = Result<T, RadioError>;
 
 impl Radio {
-    pub async fn new(
+    pub fn new(
+        address: Address,
+        receive_callback: Option<ReceiveCallback>,
         rf_spi: RadioSpi,
         rf_sck: RadioSck,
         rf_mosi: RadioMosi,
         rf_miso: RadioMiso,
         rf_cs: Output<'static>,
-        mut rf_rst: Output<'static>,
-        rf_int: Flex<'static>,
-    ) -> Result<Radio, Rfm69Error> {
+    ) -> Radio {
         let spi_config: SpiConfig = Default::default();
         let spi_driver = Spi::new_blocking(rf_spi, rf_sck, rf_mosi, rf_miso, spi_config);
         let spi_device = ExclusiveDevice::new_no_delay(spi_driver, rf_cs).unwrap();
+        Radio {
+            rfm69: blocking_mutex::Mutex::new(RefCell::new(Rfm69::new(spi_device))),
+            address,
+            receive_callback,
+            last_rssi: 0,
+        }
+    }
 
-        let mut rfm69 = Rfm69::new(spi_device);
-
+    pub async fn init(&mut self, mut rf_rst: Output<'static>) -> RadioResult<()> {
         // 7.2.2. Manual Reset Pin
         //
         // RESET should be pulled high for a hundred microseconds, and then
@@ -83,11 +110,12 @@ impl Radio {
         rf_rst.set_low();
         Timer::after_millis(5).await;
 
+        let mut rfm69 = self.rfm69.borrow().borrow_mut();
         // See if the radio exists
         let version = rfm69.read(registers::Registers::Version)?;
         if version == 0 {
             defmt::info!("Radio not found");
-            return Err(Rfm69Error::Timeout);
+            return Err(RadioError::NoRadio);
         }
 
         rfm69.mode(Mode::Standby)?;
@@ -135,54 +163,49 @@ impl Radio {
             zin: LnaImpedance::Ohm50,
             gain_select: LnaGain::AgcLoop,
         })?;
-
-        Ok(Radio {
-            rfm69,
-            rx_ring: RingBuffer::new(),
-            address: Address(0),
-            receive_callback: None,
-        })
-    }
-}
-
-impl Comm for Radio {
-    fn name(&self) -> &str {
-        "Radio"
+        Ok(())
     }
 
-    fn send_to(&mut self, to_addr: Address, data: &[u8]) -> bool {
+    pub fn send_to(&mut self, to_addr: Address, data: &[u8]) -> Result<(), RadioError> {
+        let mut rfm69 = self.rfm69.borrow().borrow_mut();
+
         let mut packet = Vec::<u8, MAX_PAYLOAD_SIZE>::new();
         packet.push(to_addr.value());
         packet.extend_from_slice(data);
-        self.rfm69.send(&packet).unwrap();
-        true
+        rfm69.send(&packet)?;
+        Ok(())
     }
 
-    fn available(&self) -> bool {
-        !self.rx_ring.is_empty()
+    pub fn recv(
+        rfm69: &mut Rfm69<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>>,
+        my_address: Address,
+        into: &mut [u8],
+    ) -> Result<(), RadioError> {
+        if !rfm69.is_packet_ready()? {
+            return Err(RadioError::NoPacketAvailable);
+        }
+
+        rfm69.mode(Mode::Standby)?;
+
+        let len = rfm69.read(Registers::Fifo)? as usize;
+        if len > MAX_PAYLOAD_SIZE {
+            // The chip shouldn't let this happen.
+            return Err(RadioError::InvalidPacket);
+        }
+        if len < 1 {
+            return Err(RadioError::InvalidPacket);
+        }
+
+        let to_addr_byte = rfm69.read(Registers::Fifo)?;
+        let to_addr = Address(to_addr_byte);
+        if to_addr != my_address && to_addr != BROADCAST_ADDRESS {
+            return Err(RadioError::NoPacketAvailable);
+        }
+        rfm69.recv(&mut into[..len - 1])?;
+        Ok(())
     }
 
-    fn recv(&mut self) -> Option<&RxBuffer> {
-        self.rx_ring.next_read()
-    }
-
-    fn set_receive_callback(&mut self, callback: Option<ReceiveCallback>) {
-        self.receive_callback = callback;
-    }
-
-    fn set_address(&mut self, address: Address) {
-        self.address = address;
-    }
-
-    fn set_default_to_rx_mode(&mut self) {
-        todo!()
-    }
-
-    fn set_spy_mode(&mut self, is_spy_mode: bool) {
-        todo!()
-    }
-
-    fn last_rssi(&self) -> i8 {
-        self.rfm69.rssi() as i8 / 2
+    pub fn last_rssi(&self) -> i8 {
+        self.last_rssi
     }
 }

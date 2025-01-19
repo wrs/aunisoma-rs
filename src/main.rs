@@ -2,18 +2,31 @@
 #![no_main]
 
 use crate::blinker::blinker_task;
-use crate::debug_port::debug_port_task;
-use crate::lights::lights_task;
-use crate::panel_bus::panel_bus_task;
-use crate::radio::radio_task;
-use crate::usb::usb_task;
-use comm::{Address, Comm};
-use core::{panic::PanicInfo, sync::atomic::AtomicI8};
+use comm::{Address, Comm, CommImpl, RxBuffer};
+use core::{
+    cell::{Cell, RefCell},
+    panic::PanicInfo,
+};
+use cortex_m::singleton;
+use debug_port::DebugPort;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Input;
-use embassy_time::Timer;
+use embassy_sync::{
+    blocking_mutex::{
+        self,
+        raw::{NoopRawMutex, ThreadModeRawMutex},
+        CriticalSectionMutex,
+    },
+    mutex::Mutex,
+    zerocopy_channel::{Channel, Receiver},
+};
+use embassy_time::{Instant, Timer};
 use num_enum::TryFromPrimitive;
+use panel::Panel;
+use panel_bus::PanelBus;
+use radio::{radio_receiver_task, Radio};
+use serial::Serial;
 // use panic_itm as _;
 #[cfg(feature = "use-itm")]
 use defmt_itm as _;
@@ -34,6 +47,8 @@ const BOOT_MAGIC_VALUE: u32 = 0xdeadbeef;
 // See "wfe interfering with RTT and flashing"
 // https://github.com/embassy-rs/embassy/issues/1742
 
+static mut RX_BUFFER: [RxBuffer; 8] = [const { RxBuffer::new() }; 8];
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     check_boot_status();
@@ -44,63 +59,96 @@ async fn main(spawner: Spawner) {
         defmt_itm::enable(cp.ITM);
     }
 
-    DEFMT_READY.store(1, core::sync::atomic::Ordering::Relaxed);
-
     defmt::info!("Main task started");
 
     let board = board::hookup();
 
     StatusLEDs::init(board.status_leds);
 
-    let mut app = App::new(board.user_btn, board.pir_1, board.pir_2);
-    app.determine_mode().await;
-
     spawner.must_spawn(blinker_task());
-    spawner.must_spawn(debug_port_task(
-        board.dbg_usart,
-        board.dbg_usart_rx,
-        board.dbg_usart_tx,
-    ));
-    spawner.must_spawn(lights_task(
-        board.led_timer,
-        board.led_strip.red,
-        board.led_strip.green,
-        board.led_strip.blue,
-    ));
 
-    let comm: &mut dyn Comm;
+    let mut comm = Comm {
+        name: "PanelBus",
+        receive_callback: None,
+        address: Address(flash::get_my_id()),
+        actual: None,
+    };
 
-    if let Ok(radio) = radio::setup_radio(
+    let panel_bus = PanelBus::new(
+        comm.address,
+        Some(&(App::receive_callback as fn())),
+        board.panel_bus_usart,
+        board.panel_bus_usart_tx,
+        board.panel_bus_usart_tx_dma,
+        board.panel_bus_usart_rx_dma,
+        board.ser_out_en,
+    )
+    .await;
+
+    let radio = Radio::new(
+        comm.address,
+        Some(&(App::receive_callback as fn())),
         board.rf_spi,
         board.rf_sck,
         board.rf_mosi,
         board.rf_miso,
         board.rf_cs,
-        board.rf_rst,
-    )
-    .await
-    {
-        spawner.must_spawn(radio_task(radio, board.rf_int));
-        comm = &mut radio;
-    } else {
-        defmt::error!("Radio setup failed");
+    );
+    let radio_mutex = singleton!(RADIO_MUTEX: Mutex<ThreadModeRawMutex, RefCell<Radio>> = Mutex::new(RefCell::new(radio))).unwrap();
 
-        spawner.must_spawn(panel_bus_task(
-            board.panel_bus_usart,
-            board.panel_bus_usart_tx,
-            board.panel_bus_usart_tx_dma,
-            board.panel_bus_usart_rx_dma,
-            board.ser_out_en,
+    let rx_channel = singleton!(RX_CHANNEL: Channel<'static, ThreadModeRawMutex, RxBuffer> = Channel::new(unsafe { &mut RX_BUFFER })).unwrap();
+    let (rx_sender, rx_receiver) = rx_channel.split();
+
+    let mut using_radio = false;
+
+    let radio = radio_mutex.lock().await;
+    if radio.borrow_mut().init(board.rf_rst).await.is_ok() {
+        using_radio = true;
+        comm.actual = Some(CommImpl::Radio(radio_mutex));
+        spawner.must_spawn(radio_receiver_task(
+            radio_mutex,
+            board.rf_int,
+            board.rf_exti,
+            rx_sender,
         ));
+    } else {
+        defmt::info!("No radio");
+        comm.actual = Some(CommImpl::PanelBus(panel_bus));
     }
-    spawner.must_spawn(usb_task(
+
+    let mut rx_buffer = [0; 128];
+    let mut tx_buffer = [0; 128];
+    let debug_port = DebugPort::<256>::new(
+        board.dbg_usart,
+        board.dbg_usart_rx,
+        board.dbg_usart_tx,
+        &mut rx_buffer,
+        &mut tx_buffer,
+    );
+
+    let usb_serial = usb::init(
+        spawner,
         board.usb,
         board.usb_pullup,
         board.usb_dp,
         board.usb_dm,
-    ));
+    )
+    .await;
 
-    app.run().await;
+    {
+        let mut app = App {
+            mode: Mode::Panel,
+            address: comm.address,
+            using_radio,
+            rx_receiver,
+            user_btn: board.user_btn,
+            pir_1: board.pir_1,
+            pir_2: board.pir_2,
+        };
+        app.determine_mode().await;
+
+        spawner.must_spawn(app_task(app, Serial::UsbSerial(usb_serial), comm));
+    }
 
     loop {
         StatusLEDs::set(3);
@@ -149,36 +197,52 @@ pub enum Mode {
     Spy = 3,
 }
 
-struct App {
+pub struct App {
     mode: Mode,
-    my_id: Address,
+    address: Address,
+    using_radio: bool,
+    rx_receiver: Receiver<'static, ThreadModeRawMutex, RxBuffer>,
     user_btn: Input<'static>,
     pir_1: Input<'static>,
     pir_2: Input<'static>,
 }
 
-impl App {
-    fn new(user_btn: Input<'static>, pir_1: Input<'static>, pir_2: Input<'static>) -> Self {
-        Self {
-            mode: Mode::Panel,
-            my_id: Address(flash::get_my_id()),
-            user_btn,
-            pir_1,
-            pir_2,
+static RECEIVE_TIME: CriticalSectionMutex<Cell<Instant>> =
+    CriticalSectionMutex::new(Cell::new(Instant::from_ticks(0)));
+
+#[embassy_executor::task]
+async fn app_task(app: App, serial: Serial<'static, 256>, mut comm: Comm<'static>) {
+    info!(
+        "Aunisoma version {} ID={} Mode={}",
+        version::VERSION,
+        app.address.0,
+        app.mode as u8
+    );
+
+    match app.mode {
+        Mode::Master => {
+            // let mut master = Master::new(self.my_id, comm);
+            // master.run(serial).await;
         }
+        Mode::Panel => {
+            let mut panel = Panel::new(app);
+            panel.run(serial, &mut comm).await;
+        }
+        Mode::Spy => loop {
+            Timer::after_millis(100).await;
+        },
+    }
+}
+
+impl App {
+    fn get_pirs(&self) -> u8 {
+        ((self.pir_1.is_high() as u8) << 0) | ((self.pir_2.is_high() as u8) << 1)
     }
 
-    async fn run(&mut self) {
-        info!(
-            "Aunisoma version {} ID={} Mode={}",
-            version::VERSION,
-            self.my_id.0,
-            self.mode as u8
-        );
-
-        loop {
-            Timer::after_millis(100).await;
-        }
+    fn receive_callback() {
+        RECEIVE_TIME.lock(|time| {
+            time.set(Instant::now());
+        });
     }
 
     fn user_btn_pressed(&self) -> bool {
@@ -195,7 +259,7 @@ impl App {
     async fn determine_mode(&mut self) {
         let mut mode = flash::get_default_mode();
 
-        if self.my_id == Address(0) {
+        if self.address == Address(0) {
             mode = Mode::Spy;
         } else {
             if self.user_btn_pressed() {
@@ -256,56 +320,9 @@ impl App {
 
 #[inline(never)]
 #[panic_handler] // built-in ("core") attribute
-fn core_panic(info: &PanicInfo) -> ! {
+fn core_panic(info: &PanicInfo<'_>) -> ! {
     defmt::error!("Panic: {:?}", info);
     loop {}
-}
-
-// Work in progress -- not sure how trace was intended to be used
-
-static DEFMT_READY: AtomicI8 = AtomicI8::new(0);
-
-#[no_mangle]
-extern "Rust" fn _embassy_trace_task_new(executor_id: u32, task_id: u32) {
-    if DEFMT_READY.load(core::sync::atomic::Ordering::Relaxed) != 0 {
-        defmt::info!("task_new: executor_id={}, task_id={}", executor_id, task_id);
-    }
-}
-#[no_mangle]
-extern "Rust" fn _embassy_trace_task_exec_begin(executor_id: u32, task_id: u32) {
-    if DEFMT_READY.load(core::sync::atomic::Ordering::Relaxed) != 0 {
-        defmt::info!(
-            "task_exec_begin: executor_id={}, task_id={}",
-            executor_id,
-            task_id
-        );
-    }
-}
-#[no_mangle]
-extern "Rust" fn _embassy_trace_task_exec_end(executor_id: u32, task_id: u32) {
-    if DEFMT_READY.load(core::sync::atomic::Ordering::Relaxed) != 0 {
-        defmt::info!(
-            "task_exec_end: executor_id={}, task_id={}",
-            executor_id,
-            task_id
-        );
-    }
-}
-#[no_mangle]
-extern "Rust" fn _embassy_trace_task_ready_begin(executor_id: u32, task_id: u32) {
-    if DEFMT_READY.load(core::sync::atomic::Ordering::Relaxed) != 0 {
-        defmt::info!(
-            "task_ready_begin: executor_id={}, task_id={}",
-            executor_id,
-            task_id
-        );
-    }
-}
-#[no_mangle]
-extern "Rust" fn _embassy_trace_executor_idle(executor_id: u32) {
-    if DEFMT_READY.load(core::sync::atomic::Ordering::Relaxed) != 0 {
-        defmt::info!("executor_idle: executor_id={}", executor_id);
-    }
 }
 
 mod blinker;
@@ -313,13 +330,13 @@ mod board;
 mod comm;
 mod debug_port;
 mod flash;
-mod lights;
-mod logger;
+mod line_breaker;
 mod master;
 mod panel;
 mod panel_bus;
 mod radio;
 mod ring_buffer;
+mod serial;
 mod status_leds;
 mod usb;
 mod version;

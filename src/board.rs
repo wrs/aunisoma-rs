@@ -1,8 +1,9 @@
-use embassy_stm32::gpio::{Flex, Input, Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::peripherals;
 use embassy_stm32::peripherals::{SPI1, TIM2, USART1, USART2};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::timer::simple_pwm::{self, PwmPin};
+use embassy_stm32::timer::low_level::CountingMode;
+use embassy_stm32::timer::simple_pwm::{self, PwmPin, SimplePwm, SimplePwmChannel};
 
 pub type DbgUsart = USART1;
 pub type DbgUsartRx = peripherals::PA10;
@@ -22,9 +23,17 @@ pub type UsbDp = peripherals::PA12;
 pub type UsbDm = peripherals::PA11;
 
 pub struct LedStrip {
-    pub red: PwmPin<'static, TIM2, simple_pwm::Ch1>,
-    pub green: PwmPin<'static, TIM2, simple_pwm::Ch2>,
-    pub blue: PwmPin<'static, TIM2, simple_pwm::Ch4>,
+    pub red_pwm: SimplePwmChannel<'static, LedTimer>,
+    pub green_pwm: SimplePwmChannel<'static, LedTimer>,
+    pub blue_pwm: SimplePwmChannel<'static, LedTimer>,
+}
+
+impl LedStrip {
+    pub fn set_colors(&mut self, red: u8, green: u8, blue: u8) {
+        self.red_pwm.set_duty_cycle_fraction(red as u16, 255);
+        self.green_pwm.set_duty_cycle_fraction(green as u16, 255);
+        self.blue_pwm.set_duty_cycle_fraction(blue as u16, 255);
+    }
 }
 
 pub struct Board {
@@ -37,7 +46,6 @@ pub struct Board {
     pub panel_bus_usart_rx_dma: PanelBusUsartRxDma,
     pub led_strip: LedStrip,
     pub status_leds: [Output<'static>; 4],
-    pub led_timer: LedTimer,
     pub pir_1: Input<'static>,
     pub pir_2: Input<'static>,
     pub rf_cs: Output<'static>,
@@ -84,10 +92,23 @@ pub fn hookup() -> Board {
         .mapr()
         .modify(|w| w.set_swj_cfg(0b010));
 
+    let led_red = PwmPin::<TIM2, simple_pwm::Ch1>::new_ch1(p.PA0, OutputType::PushPull);
+    let led_green = PwmPin::<TIM2, simple_pwm::Ch2>::new_ch2(p.PA1, OutputType::PushPull);
     #[cfg(feature = "rev-d")]
     let led_blue = PwmPin::<TIM2, simple_pwm::Ch3>::new_ch3(p.PA2, OutputType::PushPull);
     #[cfg(feature = "rev-e")]
     let led_blue = PwmPin::<TIM2, simple_pwm::Ch4>::new_ch4(p.PA3, OutputType::PushPull);
+
+    let pwm = SimplePwm::new(
+        p.TIM2,
+        Some(led_red),
+        Some(led_green),
+        None,
+        Some(led_blue),
+        Hertz(1000),
+        CountingMode::EdgeAlignedUp,
+    )
+    .split();
 
     Board {
         dbg_usart: p.USART1,
@@ -98,9 +119,9 @@ pub fn hookup() -> Board {
         panel_bus_usart_tx_dma: p.DMA1_CH7,
         panel_bus_usart_rx_dma: p.DMA1_CH6,
         led_strip: LedStrip {
-            red: PwmPin::<TIM2, simple_pwm::Ch1>::new_ch1(p.PA0, OutputType::PushPull),
-            green: PwmPin::<TIM2, simple_pwm::Ch2>::new_ch2(p.PA1, OutputType::PushPull),
-            blue: led_blue,
+            red_pwm: pwm.ch1,
+            green_pwm: pwm.ch2,
+            blue_pwm: pwm.ch4,
         },
         status_leds: [
             Output::new(p.PB15, Level::High, Speed::VeryHigh),
@@ -108,7 +129,6 @@ pub fn hookup() -> Board {
             Output::new(p.PB13, Level::High, Speed::VeryHigh),
             Output::new(p.PB12, Level::High, Speed::VeryHigh),
         ],
-        led_timer: p.TIM2,
         pir_1: Input::new(p.PB10, Pull::Up),
         pir_2: Input::new(p.PB2, Pull::Up),
         rf_cs: Output::new(p.PB0, Level::High, Speed::VeryHigh),
