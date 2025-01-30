@@ -1,6 +1,6 @@
 use core::cell::RefCell;
 
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, mutex::Mutex};
+use embassy_sync::blocking_mutex::{raw::ThreadModeRawMutex, Mutex};
 
 pub const MAX_PAYLOAD_SIZE: usize = 64;
 
@@ -51,7 +51,7 @@ impl From<crate::panel_bus::PanelBusError> for CommError {
 impl<'a> Comm<'a> {
     pub async fn last_rssi(&self) -> i8 {
         match &self.actual {
-            Some(CommImpl::Radio(radio)) => radio.lock().await.borrow().last_rssi(),
+            Some(CommImpl::Radio(radio)) => radio.lock(|radio| radio.borrow().last_rssi()),
             Some(CommImpl::PanelBus(_)) => 0,
             None => 0,
         }
@@ -59,7 +59,9 @@ impl<'a> Comm<'a> {
 
     pub async fn send_to(&mut self, to_addr: Address, data: &[u8]) -> Result<(), CommError> {
         match &mut self.actual {
-            Some(CommImpl::Radio(radio)) => Ok(radio.lock().await.borrow_mut().send_to(to_addr, data)?),
+            Some(CommImpl::Radio(radio)) => {
+                radio.lock(|radio| radio.borrow_mut().send_to(to_addr, data)).map_err(CommError::Radio)
+            }
             Some(CommImpl::PanelBus(panel_bus)) => Ok(panel_bus.send_to(to_addr, data)?),
             None => Err(CommError::Radio(crate::radio::RadioError::NoRadio)),
         }

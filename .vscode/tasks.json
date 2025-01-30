@@ -35,7 +35,7 @@
             ],
             "options": {
                 "env": {
-                    // "DEFMT_LOG": "trace"
+                    "DEFMT_LOG": "trace"
                 }
             },
             "problemMatcher": [

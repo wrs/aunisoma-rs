@@ -3,11 +3,12 @@ use crate::line_breaker::LineBreaker;
 use cortex_m::singleton;
 use defmt::info;
 use embassy_executor::Spawner;
+use embassy_futures::join;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::USB;
 use embassy_stm32::usb::Driver;
 use embassy_stm32::{bind_interrupts, peripherals, usb};
-use embassy_time::Timer;
+use embassy_time::{Delay, Timer};
 use embassy_usb::class::cdc_acm;
 use embassy_usb::{Builder, UsbDevice};
 use embedded_io_async::Write;
@@ -46,6 +47,7 @@ pub async fn init<const BUFFER_SIZE: usize>(
     config.device_sub_class = 0x02;
     config.device_protocol = 0x01;
     config.max_packet_size_0 = MAX_PACKET_SIZE;
+    config.composite_with_iads = false;
 
     struct Resources {
         config_descriptor: [u8; 64],
@@ -59,7 +61,8 @@ pub async fn init<const BUFFER_SIZE: usize>(
         bos_descriptor: [0; 16],
         control_buf: [0; MAX_PACKET_SIZE as usize],
         serial_state: cdc_acm::State::new(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let mut builder = Builder::new(
         driver,
@@ -70,7 +73,7 @@ pub async fn init<const BUFFER_SIZE: usize>(
         &mut resources.control_buf,
     );
 
-    let class = cdc_acm::CdcAcmClass::new(
+    let mut class = cdc_acm::CdcAcmClass::new(
         &mut builder,
         &mut resources.serial_state,
         MAX_PACKET_SIZE as u16,
@@ -78,14 +81,56 @@ pub async fn init<const BUFFER_SIZE: usize>(
 
     let usb = builder.build();
 
-    spawner.must_spawn(driver_task(usb));
+    // join::join(driver_task(usb), command_task.run()).await;
 
+    // WTF this works as an await but not as a task
+    spawner.must_spawn(driver_task(usb));
+    // spawner.must_spawn(command_task_x(class));
+
+    Timer::after_millis(1000).await;
     UsbSerial::new(class)
 }
 
 #[embassy_executor::task]
 async fn driver_task(mut device: UsbDevice<'static, Driver<'static, USB>>) {
+    // async fn driver_task<'a>(mut device: UsbDevice<'a, Driver<'a, USB>>) {
     device.run().await;
+}
+
+#[embassy_executor::task]
+async fn command_task_x(class: cdc_acm::CdcAcmClass<'static, Driver<'static, USB>>) {
+    let mut command_task = CommandTask::new(class);
+    command_task.run().await;
+}
+
+struct CommandTask<'a> {
+    sender: cdc_acm::Sender<'a, Driver<'a, USB>>,
+    receiver: cdc_acm::Receiver<'a, Driver<'a, USB>>,
+}
+impl<'a> CommandTask<'a> {
+    fn new(class: cdc_acm::CdcAcmClass<'a, Driver<'a, USB>>) -> Self {
+        let (sender, receiver) = class.split();
+        Self { sender, receiver }
+    }
+
+    async fn run(&mut self) {
+        loop {
+            self.sender.wait_connection().await;
+            let mut buf = [0; MAX_PACKET_SIZE as usize];
+            loop {
+                self.receiver.wait_connection().await;
+                match self.receiver.read_packet(&mut buf).await {
+                    Ok(n) => {
+                        info!("{:?}", &buf[..n]);
+                    }
+                    Err(_) => {
+                        info!("USB disconnected");
+                        break;
+                    }
+                };
+            }
+        }
+    }
 }
 
 struct CdcWriter<'s, 'a> {
@@ -155,6 +200,7 @@ impl<'a, const BUFFER_SIZE: usize> UsbSerial<'a, BUFFER_SIZE> {
         let mut buf = [0; MAX_PACKET_SIZE as usize];
         loop {
             self.class.wait_connection().await;
+            info!("USB connected");
             let n = match self.class.read_packet(&mut buf).await {
                 Ok(n) => n,
                 Err(_) => {

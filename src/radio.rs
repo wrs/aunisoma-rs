@@ -2,7 +2,7 @@ use crate::board::{self, RadioMosi};
 use crate::comm::{ReceiveCallback, BROADCAST_ADDRESS};
 use crate::{
     board::{RadioMiso, RadioSck, RadioSpi},
-    comm::{Address, Comm, RxBuffer, MAX_PAYLOAD_SIZE},
+    comm::{Address, RxBuffer, MAX_PAYLOAD_SIZE},
 };
 use core::cell::RefCell;
 use core::convert::Infallible;
@@ -12,9 +12,8 @@ use embassy_stm32::{
     mode::Blocking,
     spi::{Config as SpiConfig, Spi},
 };
-use embassy_sync::blocking_mutex;
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
-use embassy_sync::mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::zerocopy_channel::Sender;
 use embassy_time::Timer;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
@@ -33,8 +32,8 @@ const BITRATE: u32 = 250_000;
 pub struct Radio {
     receive_callback: Option<ReceiveCallback>,
     address: Address,
-    rfm69: blocking_mutex::Mutex<
-        NoopRawMutex,
+    rfm69: Mutex<
+        ThreadModeRawMutex,
         RefCell<Rfm69<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, NoDelay>>>,
     >,
     last_rssi: i8,
@@ -50,13 +49,16 @@ pub async fn radio_receiver_task(
     let mut rf_int_pin = ExtiInput::new(rf_int, rf_exti, Pull::None);
     loop {
         rf_int_pin.wait_for_rising_edge().await;
-        let radio = radio.lock().await;
-        let radio = radio.borrow();
-        let mut rfm69 = radio.rfm69.borrow().borrow_mut();
-        let p = radio_rx_sender.send().await;
-        if Radio::recv(&mut rfm69, radio.address, &mut p.as_mut_slice()).is_ok() {
-            radio_rx_sender.send_done();
-        }
+        radio.lock(|radio| {
+            let (address, mut rfm69) = (
+                radio.borrow().address,
+                radio.borrow_mut().rfm69.lock(|rfm69| rfm69.borrow_mut()),
+            );
+            let p = radio_rx_sender.send().await;
+            if Radio::recv(&mut rfm69, address, &mut p.as_mut_slice()).is_ok() {
+                radio_rx_sender.send_done();
+            }
+        });
         // TODO
         // radio.last_rssi = rfm69.rssi() as i8 / 2;
     }

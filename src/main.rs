@@ -14,11 +14,11 @@ use embassy_executor::Spawner;
 use embassy_stm32::gpio::Input;
 use embassy_sync::{
     blocking_mutex::{
-        self,
-        raw::{NoopRawMutex, ThreadModeRawMutex},
+        raw::ThreadModeRawMutex,
+        Mutex,
         CriticalSectionMutex,
     },
-    mutex::Mutex,
+    signal::Signal,
     zerocopy_channel::{Channel, Receiver},
 };
 use embassy_time::{Instant, Timer};
@@ -101,8 +101,8 @@ async fn main(spawner: Spawner) {
 
     let mut using_radio = false;
 
-    let radio = radio_mutex.lock().await;
-    if radio.borrow_mut().init(board.rf_rst).await.is_ok() {
+    let radio = radio_mutex.lock(|radio| radio.borrow_mut());
+    if radio.init(board.rf_rst).await.is_ok() {
         using_radio = true;
         comm.actual = Some(CommImpl::Radio(radio_mutex));
         spawner.must_spawn(radio_receiver_task(
@@ -116,6 +116,9 @@ async fn main(spawner: Spawner) {
         comm.actual = Some(CommImpl::PanelBus(panel_bus));
     }
 
+    static CMD_BUFFER: Mutex<ThreadModeRawMutex, RefCell<[u8; 256]>> = Mutex::new(RefCell::new([0; 256]));
+    static CMD_SIGNAL: Signal<ThreadModeRawMutex, bool> = Signal::new();
+
     let mut rx_buffer = [0; 128];
     let mut tx_buffer = [0; 128];
     let debug_port = DebugPort::<256>::new(
@@ -124,9 +127,11 @@ async fn main(spawner: Spawner) {
         board.dbg_usart_tx,
         &mut rx_buffer,
         &mut tx_buffer,
+        &CMD_BUFFER,
+        &CMD_SIGNAL,
     );
 
-    let usb_serial = usb::init(
+    let usb_serial = usb::init::<256>(
         spawner,
         board.usb,
         board.usb_pullup,
@@ -146,7 +151,7 @@ async fn main(spawner: Spawner) {
             pir_2: board.pir_2,
         };
         app.determine_mode().await;
-
+        app.mode = Mode::Panel;
         spawner.must_spawn(app_task(app, Serial::UsbSerial(usb_serial), comm));
     }
 

@@ -250,7 +250,7 @@ impl Panel {
             let mut cmd = Vec::<u8, 256>::new();
             serial.read_line(&mut cmd).await;
 
-            match cmd.get(0) {
+            match cmd.first() {
                 None => continue,
                 Some(b'D') => {
                     todo!("Change mode");
