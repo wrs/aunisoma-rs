@@ -1,4 +1,4 @@
-use crate::{is_warm_boot, Mode};
+use crate::{Mode, boot};
 use defmt::{debug, info, panic};
 use embassy_stm32::pac::FLASH;
 
@@ -7,11 +7,11 @@ pub fn get_my_id() -> u8 {
     data0
 }
 
-#[link_section = ".noinit"]
+#[unsafe(link_section = ".noinit")]
 static mut DEFAULT_MODE: Mode = Mode::Panel;
 
 pub fn get_default_mode() -> Mode {
-    if is_warm_boot() {
+    if boot::is_warm_boot() {
         info!("warm boot, default mode={}", unsafe { DEFAULT_MODE } as u8);
         return unsafe { DEFAULT_MODE };
     }
@@ -38,7 +38,7 @@ pub fn set_default_mode(mode: Mode) {
 }
 
 pub fn get_user_bytes() -> (u8, u8) {
-    return (FLASH.obr().read().data0(), FLASH.obr().read().data1());
+    (FLASH.obr().read().data0(), FLASH.obr().read().data1())
 }
 
 pub fn write_user_bytes(data0: u8, data1: u8) {

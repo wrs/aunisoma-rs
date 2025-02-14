@@ -1,158 +1,71 @@
 #![no_std]
 #![no_main]
 
-use crate::blinker::blinker_task;
-use comm::{Address, Comm, CommImpl, RxBuffer};
-use core::{
-    cell::{Cell, RefCell},
-    panic::PanicInfo,
-};
-use cortex_m::singleton;
-use debug_port::DebugPort;
-use defmt::info;
-use embassy_executor::Spawner;
-use embassy_stm32::gpio::Input;
-use embassy_sync::{
-    blocking_mutex::{
-        raw::ThreadModeRawMutex,
-        Mutex,
-        CriticalSectionMutex,
-    },
-    signal::Signal,
-    zerocopy_channel::{Channel, Receiver},
-};
-use embassy_time::{Instant, Timer};
-use num_enum::TryFromPrimitive;
-use panel::Panel;
-use panel_bus::PanelBus;
-use radio::{radio_receiver_task, Radio};
-use serial::Serial;
-// use panic_itm as _;
-#[cfg(feature = "use-itm")]
-use defmt_itm as _;
-#[cfg(feature = "use-rtt")]
+extern crate alloc;
+
+use comm::Address;
+use defmt::{info, Format};
 use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_time::Timer;
+use embedded_alloc::LlffHeap as Heap;
+use num_enum::TryFromPrimitive;
 use status_leds::StatusLEDs;
 // use panic_halt as _;
 
-#[link_section = ".noinit"]
-static mut BOOT_COUNT: u8 = 0;
-
-static mut IS_WARM_BOOT: bool = false;
-#[link_section = ".noinit"]
-static mut BOOT_MAGIC: u32 = 0;
-const BOOT_MAGIC_VALUE: u32 = 0xdeadbeef;
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 // NOTE: Using Executor requires debugging with connect-under-reset.
 // See "wfe interfering with RTT and flashing"
 // https://github.com/embassy-rs/embassy/issues/1742
 
-static mut RX_BUFFER: [RxBuffer; 8] = [const { RxBuffer::new() }; 8];
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    check_boot_status();
+    defmt::info!("\n-----\nMain task started\n-----");
 
-    #[cfg(feature = "use-itm")]
+    // Initialize the heap
     {
-        let cp = cortex_m::Peripherals::take().unwrap();
-        defmt_itm::enable(cp.ITM);
+        use core::mem::MaybeUninit;
+        const HEAP_SIZE: usize = 1024;
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        #[allow(static_mut_refs)]
+        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) };
     }
 
-    defmt::info!("Main task started");
+    boot::check_boot_status();
 
     let board = board::hookup();
 
     StatusLEDs::init(board.status_leds);
 
-    spawner.must_spawn(blinker_task());
+    spawner.must_spawn(blinker::blinker_task());
 
-    let mut comm = Comm {
-        name: "PanelBus",
-        receive_callback: None,
-        address: Address(flash::get_my_id()),
-        actual: None,
-    };
-
-    let panel_bus = PanelBus::new(
-        comm.address,
-        Some(&(App::receive_callback as fn())),
-        board.panel_bus_usart,
-        board.panel_bus_usart_tx,
-        board.panel_bus_usart_tx_dma,
-        board.panel_bus_usart_rx_dma,
-        board.ser_out_en,
-    )
-    .await;
-
-    let radio = Radio::new(
-        comm.address,
-        Some(&(App::receive_callback as fn())),
-        board.rf_spi,
-        board.rf_sck,
-        board.rf_mosi,
-        board.rf_miso,
-        board.rf_cs,
-    );
-    let radio_mutex = singleton!(RADIO_MUTEX: Mutex<ThreadModeRawMutex, RefCell<Radio>> = Mutex::new(RefCell::new(radio))).unwrap();
-
-    let rx_channel = singleton!(RX_CHANNEL: Channel<'static, ThreadModeRawMutex, RxBuffer> = Channel::new(unsafe { &mut RX_BUFFER })).unwrap();
-    let (rx_sender, rx_receiver) = rx_channel.split();
-
-    let mut using_radio = false;
-
-    let radio = radio_mutex.lock(|radio| radio.borrow_mut());
-    if radio.init(board.rf_rst).await.is_ok() {
-        using_radio = true;
-        comm.actual = Some(CommImpl::Radio(radio_mutex));
-        spawner.must_spawn(radio_receiver_task(
-            radio_mutex,
-            board.rf_int,
-            board.rf_exti,
-            rx_sender,
-        ));
-    } else {
-        defmt::info!("No radio");
-        comm.actual = Some(CommImpl::PanelBus(panel_bus));
+    let address = Address(0);
+    let mode = boot::determine_mode(address);
+    if board::controls().user_btn_is_pressed() {
+        boot::toggle_mode(mode).await;
     }
 
-    static CMD_BUFFER: Mutex<ThreadModeRawMutex, RefCell<[u8; 256]>> = Mutex::new(RefCell::new([0; 256]));
-    static CMD_SIGNAL: Signal<ThreadModeRawMutex, bool> = Signal::new();
-
-    let mut rx_buffer = [0; 128];
-    let mut tx_buffer = [0; 128];
-    let debug_port = DebugPort::<256>::new(
-        board.dbg_usart,
-        board.dbg_usart_rx,
-        board.dbg_usart_tx,
-        &mut rx_buffer,
-        &mut tx_buffer,
-        &CMD_BUFFER,
-        &CMD_SIGNAL,
+    info!(
+        "Aunisoma version {} ID={} Mode={}",
+        version::VERSION,
+        address.0,
+        mode as u8
     );
 
-    let usb_serial = usb::init::<256>(
-        spawner,
-        board.usb,
-        board.usb_pullup,
-        board.usb_dp,
-        board.usb_dm,
-    )
-    .await;
-
-    {
-        let mut app = App {
-            mode: Mode::Panel,
-            address: comm.address,
-            using_radio,
-            rx_receiver,
-            user_btn: board.user_btn,
-            pir_1: board.pir_1,
-            pir_2: board.pir_2,
-        };
-        app.determine_mode().await;
-        app.mode = Mode::Panel;
-        spawner.must_spawn(app_task(app, Serial::UsbSerial(usb_serial), comm));
+    match mode {
+        Mode::Master => {
+            // let mut master = Master::new(self.my_id, comm);
+            // master.run(serial).await;
+        }
+        Mode::Panel => {
+            // let mut panel = Panel::new(app);
+            // panel.run(serial, &mut comm).await;
+        }
+        Mode::Spy => loop {
+            Timer::after_millis(100).await;
+        },
     }
 
     loop {
@@ -163,38 +76,7 @@ async fn main(spawner: Spawner) {
     }
 }
 
-fn check_boot_status() {
-    // Safety: We just booted so there aren't any threads
-    unsafe {
-        BOOT_COUNT = BOOT_COUNT.wrapping_add(1);
-        // Disallow zero so we can use it as a sentinel value
-        if BOOT_COUNT == 0 {
-            BOOT_COUNT = 1;
-        }
-
-        info!("BOOT_MAGIC={:x}", BOOT_MAGIC);
-        if BOOT_MAGIC == BOOT_MAGIC_VALUE {
-            IS_WARM_BOOT = true;
-        } else {
-            IS_WARM_BOOT = false;
-            core::ptr::write_volatile(&raw mut BOOT_MAGIC, BOOT_MAGIC_VALUE);
-        }
-
-        info!("is_warm_boot={}", IS_WARM_BOOT);
-    }
-}
-
-pub fn is_warm_boot() -> bool {
-    // Safety: This is only written once at boot time.
-    unsafe { IS_WARM_BOOT }
-}
-
-pub fn get_boot_count() -> u8 {
-    // Safety: This is only written once at boot time.
-    unsafe { BOOT_COUNT }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Format, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Mode {
     Master = 1,
@@ -202,146 +84,17 @@ pub enum Mode {
     Spy = 3,
 }
 
-pub struct App {
-    mode: Mode,
-    address: Address,
-    using_radio: bool,
-    rx_receiver: Receiver<'static, ThreadModeRawMutex, RxBuffer>,
-    user_btn: Input<'static>,
-    pir_1: Input<'static>,
-    pir_2: Input<'static>,
-}
-
-static RECEIVE_TIME: CriticalSectionMutex<Cell<Instant>> =
-    CriticalSectionMutex::new(Cell::new(Instant::from_ticks(0)));
-
-#[embassy_executor::task]
-async fn app_task(app: App, serial: Serial<'static, 256>, mut comm: Comm<'static>) {
-    info!(
-        "Aunisoma version {} ID={} Mode={}",
-        version::VERSION,
-        app.address.0,
-        app.mode as u8
-    );
-
-    match app.mode {
-        Mode::Master => {
-            // let mut master = Master::new(self.my_id, comm);
-            // master.run(serial).await;
-        }
-        Mode::Panel => {
-            let mut panel = Panel::new(app);
-            panel.run(serial, &mut comm).await;
-        }
-        Mode::Spy => loop {
-            Timer::after_millis(100).await;
-        },
-    }
-}
-
-impl App {
-    fn get_pirs(&self) -> u8 {
-        ((self.pir_1.is_high() as u8) << 0) | ((self.pir_2.is_high() as u8) << 1)
-    }
-
-    fn receive_callback() {
-        RECEIVE_TIME.lock(|time| {
-            time.set(Instant::now());
-        });
-    }
-
-    fn user_btn_pressed(&self) -> bool {
-        self.user_btn.is_high()
-    }
-
-    /// Board 0 is always in Spy mode.
-    ///
-    /// Boards store their default mode in flash. Uninitialized boards default to
-    /// Panel mode. If the button is down at boot, the default mode will be
-    /// switched between Master and Panel. The default mode can also be changed
-    /// with the 'D' command.
-
-    async fn determine_mode(&mut self) {
-        let mut mode = flash::get_default_mode();
-
-        if self.address == Address(0) {
-            mode = Mode::Spy;
-        } else {
-            if self.user_btn_pressed() {
-                mode = self.toggle_mode().await;
-            }
-        }
-
-        match mode {
-            Mode::Master => {
-                StatusLEDs::set(1);
-            }
-            Mode::Panel => {
-                StatusLEDs::set(2);
-            }
-            Mode::Spy => {
-                StatusLEDs::set(1);
-                StatusLEDs::set(2);
-            }
-        }
-
-        self.mode = mode;
-    }
-
-    /// Toggle between Master and Panel modes
-    ///
-    async fn toggle_mode(&mut self) -> Mode {
-        let new_mode = match self.mode {
-            Mode::Master => Mode::Panel,
-            Mode::Panel => Mode::Master,
-            _ => self.mode,
-        };
-
-        flash::set_default_mode(new_mode);
-
-        info!(
-            "Mode is now {}",
-            if new_mode == Mode::Master {
-                "Master"
-            } else {
-                "Panel"
-            }
-        );
-
-        // Blink lights until button is released
-
-        while self.user_btn_pressed() {
-            StatusLEDs::set_all(0xF);
-            Timer::after_millis(250).await;
-            StatusLEDs::set_all(0);
-            Timer::after_millis(250).await;
-        }
-
-        Timer::after_millis(250).await;
-
-        cortex_m::peripheral::SCB::sys_reset();
-    }
-}
-
 #[inline(never)]
 #[panic_handler] // built-in ("core") attribute
-fn core_panic(info: &PanicInfo<'_>) -> ! {
+fn core_panic(info: &core::panic::PanicInfo<'_>) -> ! {
     defmt::error!("Panic: {:?}", info);
     loop {}
 }
 
 mod blinker;
 mod board;
+mod boot;
 mod comm;
-mod debug_port;
 mod flash;
-mod line_breaker;
-mod master;
-mod panel;
-mod panel_bus;
-mod radio;
-mod ring_buffer;
-mod serial;
 mod status_leds;
-mod usb;
 mod version;

@@ -1,46 +1,47 @@
 use core::cell::RefCell;
+
+use cortex_m::interrupt::{Mutex, free};
 use embassy_stm32::gpio::Output;
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy_sync::blocking_mutex::Mutex;
 
 pub struct StatusLEDs {
     pub leds: [Output<'static>; 4],
 }
 
-static STATUS_LEDS: Mutex<ThreadModeRawMutex, RefCell<Option<StatusLEDs>>> =
-    Mutex::new(RefCell::new(None));
+static STATUS_LEDS: Mutex<RefCell<Option<StatusLEDs>>> = Mutex::new(RefCell::new(None));
 
 impl StatusLEDs {
     pub fn init(mut leds: [Output<'static>; 4]) {
         for led in leds.iter_mut() {
             led.set_low();
         }
-        STATUS_LEDS.lock(|cell| cell.replace(Some(StatusLEDs { leds })));
-    }
-
-    #[inline(never)]
-    pub(crate) fn with_leds(f: impl FnOnce(&mut StatusLEDs)) {
-        STATUS_LEDS.lock(|cell| {
-            let mut leds = cell.borrow_mut();
-            match &mut *leds {
-                Some(leds) => f(leds),
-                None => (),
-            }
+        free(|cs| {
+            let status = STATUS_LEDS.borrow(cs);
+            *status.borrow_mut() = Some(StatusLEDs { leds });
         });
     }
 
     #[inline(never)]
     pub fn set(which: usize) {
-        StatusLEDs::with_leds(|leds| leds.leds[which].set_high());
+        free(|cs| {
+            let mut status_leds = STATUS_LEDS.borrow(cs).borrow_mut();
+            let leds = status_leds.as_mut().unwrap();
+            leds.leds[which].set_high();
+        });
     }
 
     #[inline(never)]
     pub fn reset(which: usize) {
-        StatusLEDs::with_leds(|leds| leds.leds[which].set_low());
+        free(|cs| {
+            let mut status_leds = STATUS_LEDS.borrow(cs).borrow_mut();
+            let leds = status_leds.as_mut().unwrap();
+            leds.leds[which].set_low();
+        });
     }
 
     pub fn set_all(value: u8) {
-        StatusLEDs::with_leds(|leds| {
+        free(|cs| {
+            let mut status_leds = STATUS_LEDS.borrow(cs).borrow_mut();
+            let leds = status_leds.as_mut().unwrap();
             for i in 0..4 {
                 if value & (1 << i) != 0 {
                     leds.leds[i].set_high();

@@ -61,7 +61,6 @@ pub struct Board {
     pub usb_dp: UsbDp,
     pub usb_dm: UsbDm,
     pub usb_pullup: Output<'static>,
-    pub user_btn: Input<'static>,
 }
 
 #[allow(unused_variables)]
@@ -110,6 +109,8 @@ pub fn hookup() -> Board {
     )
     .split();
 
+    unsafe { CONTROLS = Some(Controls::new(Input::new(p.PA8, Pull::Down))); }
+
     Board {
         dbg_usart: p.USART1,
         dbg_usart_rx: p.PA10,
@@ -144,6 +145,26 @@ pub fn hookup() -> Board {
         usb_dp: p.PA12,
         usb_dm: p.PA11,
         usb_pullup: Output::new(p.PA15, Level::High, Speed::VeryHigh),
-        user_btn: Input::new(p.PA8, Pull::Down),
     }
+}
+
+pub struct Controls {
+    pub user_btn: Input<'static>,
+}
+
+impl Controls {
+    pub fn new(user_btn: Input<'static>) -> Self {
+        Self { user_btn }
+    }
+
+    pub fn user_btn_is_pressed(&self) -> bool {
+        self.user_btn.is_high()
+    }
+}
+
+static mut CONTROLS: Option<Controls> = None;
+
+pub fn controls() -> &'static Controls {
+    #[allow(static_mut_refs)]
+    unsafe { CONTROLS.as_ref().unwrap() }
 }

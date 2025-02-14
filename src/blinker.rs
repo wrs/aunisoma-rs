@@ -1,4 +1,4 @@
-use crate::StatusLEDs;
+use crate::status_leds::StatusLEDs;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
 
