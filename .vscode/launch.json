@@ -23,7 +23,7 @@
             ],
             "cwd": "${workspaceRoot}",
             // "runToEntryPoint": "main",
-            "executable": "./target/thumbv7m-none-eabi/debug/${workspaceFolderBasename}",
+            "executable": "./target/thumbv7m-none-eabi/debug/aunisoma",
             "device": "STM32F103C8",
             "configFiles": [
                 "interface/stlink-dap.cfg",

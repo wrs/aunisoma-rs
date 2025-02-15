@@ -1,4 +1,4 @@
-use defmt::info;
+use defmt::{debug, info};
 use embassy_time::Timer;
 
 use crate::{Mode, board, comm::Address, flash, status_leds::StatusLEDs};
@@ -21,7 +21,7 @@ pub fn check_boot_status() {
             BOOT_COUNT = 1;
         }
 
-        info!("BOOT_MAGIC={:x}", BOOT_MAGIC);
+        debug!("BOOT_MAGIC={:x}", BOOT_MAGIC);
         if BOOT_MAGIC == BOOT_MAGIC_VALUE {
             IS_WARM_BOOT = true;
         } else {
@@ -29,7 +29,7 @@ pub fn check_boot_status() {
             BOOT_MAGIC = BOOT_MAGIC_VALUE;
         }
 
-        info!("is_warm_boot={}", IS_WARM_BOOT);
+        debug!("is_warm_boot={}", IS_WARM_BOOT);
     }
 }
 

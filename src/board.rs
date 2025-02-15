@@ -36,18 +36,20 @@ impl LedStrip {
     }
 }
 
-pub struct Board {
-    pub dbg_usart: DbgUsart,
-    pub dbg_usart_rx: DbgUsartRx,
-    pub dbg_usart_tx: DbgUsartTx,
+pub struct CmdPortPeripherals {
+    pub cmd_usart: DbgUsart,
+    pub cmd_usart_rx: DbgUsartRx,
+    pub cmd_usart_tx: DbgUsartTx,
+}
+
+pub struct PanelBusPeripherals {
     pub panel_bus_usart: PanelBusUsart,
-    pub panel_bus_usart_tx: peripherals::PA2,
+    pub panel_bus_usart_tx: PanelBusUsartTx,
     pub panel_bus_usart_tx_dma: PanelBusUsartTxDma,
     pub panel_bus_usart_rx_dma: PanelBusUsartRxDma,
-    pub led_strip: LedStrip,
-    pub status_leds: [Output<'static>; 4],
-    pub pir_1: Input<'static>,
-    pub pir_2: Input<'static>,
+}
+
+pub struct RadioPeripherals {
     pub rf_cs: Output<'static>,
     pub rf_int: RadioInt,
     pub rf_exti: RadioExti,
@@ -56,11 +58,25 @@ pub struct Board {
     pub rf_sck: RadioSck,
     pub rf_miso: RadioMiso,
     pub rf_mosi: RadioMosi,
-    pub ser_out_en: Output<'static>,
+}
+
+pub struct UsbPeripherals {
     pub usb: peripherals::USB,
     pub usb_dp: UsbDp,
     pub usb_dm: UsbDm,
     pub usb_pullup: Output<'static>,
+}
+
+pub struct Board {
+    pub cmd_port: CmdPortPeripherals,
+    pub panel_bus: PanelBusPeripherals,
+    pub radio: RadioPeripherals,
+    pub usb: UsbPeripherals,
+    pub led_strip: LedStrip,
+    pub status_leds: [Output<'static>; 4],
+    pub pir_1: Input<'static>,
+    pub pir_2: Input<'static>,
+    pub ser_out_en: Output<'static>,
 }
 
 #[allow(unused_variables)]
@@ -112,13 +128,33 @@ pub fn hookup() -> Board {
     unsafe { CONTROLS = Some(Controls::new(Input::new(p.PA8, Pull::Down))); }
 
     Board {
-        dbg_usart: p.USART1,
-        dbg_usart_rx: p.PA10,
-        dbg_usart_tx: p.PA9,
-        panel_bus_usart: p.USART2,
-        panel_bus_usart_tx: p.PA2,
-        panel_bus_usart_tx_dma: p.DMA1_CH7,
-        panel_bus_usart_rx_dma: p.DMA1_CH6,
+        cmd_port: CmdPortPeripherals {
+            cmd_usart: p.USART1,
+            cmd_usart_rx: p.PA10,
+            cmd_usart_tx: p.PA9,
+        },
+        panel_bus: PanelBusPeripherals {
+            panel_bus_usart: p.USART2,
+            panel_bus_usart_tx: p.PA2,
+            panel_bus_usart_tx_dma: p.DMA1_CH7,
+            panel_bus_usart_rx_dma: p.DMA1_CH6,
+        },
+        radio: RadioPeripherals {
+            rf_cs: Output::new(p.PB0, Level::High, Speed::VeryHigh),
+            rf_int: p.PB11,
+            rf_exti: p.EXTI11,
+            rf_rst: Output::new(p.PB1, Level::High, Speed::VeryHigh),
+            rf_spi: p.SPI1,
+            rf_sck: p.PA5,
+            rf_miso: p.PA6,
+            rf_mosi: p.PA7,
+        },
+        usb: UsbPeripherals {
+            usb: p.USB,
+            usb_dp: p.PA12,
+            usb_dm: p.PA11,
+            usb_pullup: Output::new(p.PA15, Level::High, Speed::VeryHigh),
+        },
         led_strip: LedStrip {
             red_pwm: pwm.ch1,
             green_pwm: pwm.ch2,
@@ -132,19 +168,7 @@ pub fn hookup() -> Board {
         ],
         pir_1: Input::new(p.PB10, Pull::Up),
         pir_2: Input::new(p.PB2, Pull::Up),
-        rf_cs: Output::new(p.PB0, Level::High, Speed::VeryHigh),
-        rf_int: p.PB11,
-        rf_exti: p.EXTI11,
-        rf_rst: Output::new(p.PB1, Level::High, Speed::VeryHigh),
-        rf_spi: p.SPI1,
-        rf_sck: p.PA5,
-        rf_miso: p.PA6,
-        rf_mosi: p.PA7,
         ser_out_en: Output::new(p.PA4, Level::High, Speed::VeryHigh),
-        usb: p.USB,
-        usb_dp: p.PA12,
-        usb_dm: p.PA11,
-        usb_pullup: Output::new(p.PA15, Level::High, Speed::VeryHigh),
     }
 }
 

@@ -33,11 +33,6 @@
             "args": [
                 "build"
             ],
-            "options": {
-                "env": {
-                    "DEFMT_LOG": "trace"
-                }
-            },
             "problemMatcher": [
                 "$rustc"
             ],
@@ -54,11 +49,6 @@
                 "build",
                 "--release"
             ],
-            "options": {
-                "env": {
-                    // "DEFMT_LOG": "trace"
-                }
-            },
             "problemMatcher": [
                 "$rustc"
             ],
