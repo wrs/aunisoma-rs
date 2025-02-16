@@ -12,6 +12,10 @@ impl<T: Copy> FixedVec<T> {
         self.0.len()
     }
 
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn resize(&mut self, new_len: usize, value: T) -> Result<(), ()> {
         if new_len > self.0.capacity() {
             return Err(());
@@ -19,6 +23,19 @@ impl<T: Copy> FixedVec<T> {
 
         self.0.resize(new_len, value);
         Ok(())
+    }
+
+    pub fn push(&mut self, value: T) -> Result<(), ()> {
+        if self.0.len() >= self.0.capacity() {
+            return Err(());
+        }
+
+        self.0.push(value);
+        Ok(())
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.0.get_mut(index)
     }
 
     pub fn copy_within(&mut self, src: Range<usize>, dst: usize) {

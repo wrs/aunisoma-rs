@@ -73,12 +73,13 @@ async fn main(spawner: Spawner) {
     let interactor = Interactor::new(cmd_port, usb_port);
 
     let radio = PanelRadio::new(board.radio);
-    let panel_serial = PanelSerial::new(board.panel_bus);
-    let comm = PanelComm::new(CommMode::Serial, radio, panel_serial);
+    let panel_serial = PanelSerial::new(board.panel_bus, address);
+    let comm = PanelComm::new(CommMode::Serial, address, radio, panel_serial);
 
-    let mut cmd_processor = CmdProcessor::new(interactor, comm);
+    let cmd_processor = CmdProcessor::new(interactor, comm, address);
     match mode {
-        Mode::Master | Mode::Panel => cmd_processor.run(mode).await,
+        Mode::Master => cmd_processor.run_master().await,
+        Mode::Panel => cmd_processor.run_panel().await,
         Mode::Spy => cmd_processor.run_spy().await,
     }
 }

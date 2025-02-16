@@ -1,11 +1,13 @@
 use crate::board::{CmdPortPeripherals, PanelBusPeripherals, PanelBusUsart, RadioPeripherals};
-use defmt::debug;
+use alloc::boxed::Box;
+use defmt::{debug, error};
 use embassy_stm32::{
     bind_interrupts,
     gpio::Output,
     mode::Async,
     usart::{self, HalfDuplexConfig, HalfDuplexReadback, Uart},
 };
+use embedded_io::Write;
 
 bind_interrupts!(struct Irqs {
     USART2 => usart::InterruptHandler<PanelBusUsart>;
@@ -36,11 +38,7 @@ pub struct PanelComm {
 }
 
 impl PanelComm {
-    pub fn new(
-        mode: CommMode,
-        radio: PanelRadio,
-        serial: PanelSerial,
-    ) -> Self {
+    pub fn new(mode: CommMode, address: Address, radio: PanelRadio, serial: PanelSerial) -> Self {
         Self {
             mode,
             radio,
@@ -48,15 +46,15 @@ impl PanelComm {
         }
     }
 
-    pub async fn send_packet(&mut self, data: &[u8]) {
-        debug!("Sending packet: {:x}", data);
+    pub async fn send_packet(&mut self, to: Address, data: &[u8]) {
+        debug!("Sending packet to {:x}: {:x}", to.value(), data);
         match self.mode {
-            CommMode::Radio => self.radio.send_packet(data).await,
-            CommMode::Serial => self.serial.send_packet(data).await,
+            CommMode::Radio => self.radio.send_packet(to, data).await,
+            CommMode::Serial => self.serial.send_packet(to, data).await,
         }
     }
 
-    pub async fn recv_packet(&mut self, buffer: &mut [u8]) -> &[u8] {
+    pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
         match self.mode {
             CommMode::Radio => self.radio.recv_packet(buffer).await,
             CommMode::Serial => self.serial.recv_packet(buffer).await,
@@ -71,24 +69,26 @@ impl PanelRadio {
         Self {}
     }
 
-    pub async fn send_packet(&mut self, data: &[u8]) {
+    pub async fn send_packet(&mut self, to: Address, data: &[u8]) {
         todo!()
     }
 
-    pub async fn recv_packet(&mut self, buffer: &mut [u8]) -> &[u8] {
+    pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
         todo!()
     }
 }
 
 pub struct PanelSerial {
     ser_out_en: Output<'static>,
-    usart: usart::Uart<'static, Async>,
+    tx: usart::UartTx<'static, Async>,
+    rx: usart::UartRx<'static, Async>,
+    address: Address,
 }
 
 impl PanelSerial {
-    pub fn new(mut panel_bus_peripherals: PanelBusPeripherals) -> Self {
+    pub fn new(mut panel_bus_peripherals: PanelBusPeripherals, address: Address) -> Self {
         let mut config = usart::Config::default();
-        config.baudrate = 230400;
+        config.baudrate = 1_000_000;
 
         panel_bus_peripherals.ser_out_en.set_low();
 
@@ -104,17 +104,59 @@ impl PanelSerial {
         )
         .unwrap();
 
+        let (tx, rx) = uart.split();
+
         Self {
             ser_out_en: panel_bus_peripherals.ser_out_en,
-            usart: uart,
+            tx,
+            rx,
+            address,
         }
     }
 
-    pub async fn send_packet(&mut self, data: &[u8]) {
-        self.usart.write(data).await.unwrap();
+    pub async fn send_packet(&mut self, to: Address, data: &[u8]) {
+        if data.len() > MAX_PAYLOAD_SIZE {
+            error!("Data length too long");
+            return;
+        }
+        self.ser_out_en.set_high();
+        self.tx
+            .write_all(&[0x55, 0xaa, to.value(), data.len() as u8])
+            .unwrap();
+        self.tx.write_all(data).unwrap();
+        self.tx.write(b"C").await.unwrap();
+        self.tx.flush().await.unwrap();
+        self.ser_out_en.set_low();
     }
 
-    pub async fn recv_packet(&mut self, buffer: &mut [u8]) -> &[u8] {
-        b"0"
+    pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
+        loop {
+            while self.read_byte().await != 0x55 {}
+            if self.read_byte().await != 0xaa {
+                continue;
+            }
+            let to = self.read_byte().await;
+            let len = self.read_byte().await as usize;
+            if len > buffer.len() {
+                continue;
+            }
+            if self.rx.read(&mut buffer[0..len as usize]).await.is_err() {
+                continue;
+            };
+            let crc = self.read_byte().await;
+            // TODO: check crc
+            if to == BROADCAST_ADDRESS.value() || to == self.address.value() {
+                return &buffer[0..len as usize];
+            }
+        }
+    }
+
+    async fn read_byte(&mut self) -> u8 {
+        let mut buffer = [0; 1];
+        match self.rx.read(&mut buffer).await {
+            Ok(_) => debug!("Rcvd: 0x{:x}", buffer[0]),
+            Err(e) => error!("Error reading byte: {:?}", e),
+        }
+        buffer[0]
     }
 }
