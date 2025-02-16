@@ -1,61 +1,11 @@
 use core::ops::Range;
-
-use alloc::vec::Vec;
 use defmt::debug;
+use crate::fixed_vec::FixedVec;
 
 pub struct LineBreaker {
     buffer: FixedVec<u8>,
     used_prefix: usize,
     discard: bool,
-}
-
-struct FixedVec<T: Copy>(Vec<T>);
-
-impl<T: Copy> FixedVec<T> {
-    fn new(capacity: usize) -> Self {
-        Self(Vec::with_capacity(capacity))
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn resize(&mut self, new_len: usize, value: T) -> Result<(), ()> {
-        if new_len > self.0.capacity() {
-            return Err(());
-        }
-
-        self.0.resize(new_len, value);
-        Ok(())
-    }
-
-    fn copy_within(&mut self, src: Range<usize>, dst: usize) {
-        self.0.copy_within(src, dst);
-    }
-
-    fn extend_from_slice(&mut self, src: &[T]) -> Result<(), ()> {
-        if self.0.len() + src.len() > self.0.capacity() {
-            return Err(());
-        }
-
-        self.0.extend_from_slice(src);
-        Ok(())
-    }
-
-
-
-    fn clear(&mut self) {
-        self.0.clear();
-    }
-}
-
-impl<T: Copy> core::ops::Deref for FixedVec<T> {
-    type Target = [T];
-
-    #[inline]
-    fn deref(&self) -> &[T] {
-        self.0.as_slice()
-    }
 }
 
 impl LineBreaker {
@@ -68,7 +18,8 @@ impl LineBreaker {
     }
 
     /// Keep calling process() with chunks of input. It returns None if it needs
-    /// more, or Some(line) if it found a line.
+    /// more, or Some(line) if it found a line. The newline character is not
+    /// included in the returned line.
     ///
     /// Works best if buf is at least 2*MAX_PACKET_SIZE. Otherwise it may drop
     /// the line after an over-long line.
@@ -110,13 +61,13 @@ impl LineBreaker {
                 if self.buffer.extend_from_slice(rest).is_ok() {
                     // We saved the beginning of the next line, yay happy path!
                     self.used_prefix = line_len;
-                    return Some(&self.buffer[..line_len]);
+                    return Some(&self.buffer[..line_len - 1]);
                 }
                 // We didn't have room for the beginning of the next line, so
                 // discard the rest of it.
                 self.discard = true;
                 self.used_prefix = line_len;
-                Some(&self.buffer[..line_len])
+                Some(&self.buffer[..line_len - 1])
             } else {
                 // Line too long, discard it
                 self.buffer.clear();

@@ -3,8 +3,9 @@
 
 extern crate alloc;
 
-use comm::Address;
-use command_port::CommandPort;
+use cmd_processor::CmdProcessor;
+use comm::{Address, CommMode, PanelComm, PanelRadio, PanelSerial};
+use command_serial::CommandSerial;
 use defmt::{Format, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
@@ -53,8 +54,9 @@ async fn main(spawner: Spawner) {
 
     spawner.must_spawn(blinker::blinker_task());
 
-    let address = Address(0);
-    let mode = boot::determine_mode(address);
+    let address = Address(1); // TODO: Get from EEPROM
+    // let mode = boot::determine_mode(address);
+    let mode = Mode::Master;
     if board::controls().user_btn_is_pressed() {
         boot::toggle_mode(mode).await;
     }
@@ -66,29 +68,18 @@ async fn main(spawner: Spawner) {
         mode as u8
     );
 
-    let cmd_port = CommandPort::new(board.cmd_port);
+    let cmd_port = CommandSerial::new(board.cmd_port);
     let usb_port = UsbPort::new(board.usb, &spawner).await;
+    let interactor = Interactor::new(cmd_port, usb_port);
 
-    let mut interactor = Interactor::new(cmd_port, usb_port);
+    let radio = PanelRadio::new(board.radio);
+    let panel_serial = PanelSerial::new(board.panel_bus);
+    let comm = PanelComm::new(CommMode::Serial, radio, panel_serial);
 
-    loop {
-        let mut buf = [0; 256];
-        let line = interactor.read_command(&mut buf).await;
-        info!("Command: {:a}", line);
-        interactor.reply(b"OK").await;
-    }
-
+    let mut cmd_processor = CmdProcessor::new(interactor, comm);
     match mode {
-        Mode::Master => {
-            // master.run(serial).await;
-        }
-        Mode::Panel => {
-            // let mut panel = Panel::new(app);
-            // panel.run(serial, &mut comm).await;
-        }
-        Mode::Spy => loop {
-            Timer::after_millis(100).await;
-        },
+        Mode::Master | Mode::Panel => cmd_processor.run(mode).await,
+        Mode::Spy => cmd_processor.run_spy().await,
     }
 }
 
@@ -97,14 +88,17 @@ enum CommandSource {
     Usb,
 }
 
-struct Interactor<'a> {
-    port: CommandPort<'a>,
+/// Interactor reads commands from the serial port and USB port, and replies to
+/// the port that sent the command.
+///
+pub struct Interactor<'a> {
+    port: CommandSerial<'a>,
     usb: UsbPort,
     source: CommandSource,
 }
 
 impl<'a> Interactor<'a> {
-    fn new(port: CommandPort<'a>, usb: UsbPort) -> Self {
+    fn new(port: CommandSerial<'a>, usb: UsbPort) -> Self {
         Self {
             port,
             usb,
@@ -112,7 +106,7 @@ impl<'a> Interactor<'a> {
         }
     }
 
-    async fn read_command<'b, const MAX_LEN: usize>(
+    pub async fn read_command<'b, const MAX_LEN: usize>(
         &mut self,
         buf: &'b mut [u8; MAX_LEN],
     ) -> &'b [u8] {
@@ -136,7 +130,7 @@ impl<'a> Interactor<'a> {
         &buf[..line.len()]
     }
 
-    async fn reply(&mut self, line: &[u8]) {
+    pub async fn reply(&mut self, line: &[u8]) {
         match self.source {
             CommandSource::Serial => self.port.write_line(line).await,
             CommandSource::Usb => self.usb.write_line(line).await,
@@ -154,8 +148,10 @@ fn core_panic(info: &core::panic::PanicInfo<'_>) -> ! {
 mod blinker;
 mod board;
 mod boot;
+mod cmd_processor;
 mod comm;
-mod command_port;
+mod command_serial;
+mod fixed_vec;
 mod flash;
 mod line_breaker;
 mod status_leds;

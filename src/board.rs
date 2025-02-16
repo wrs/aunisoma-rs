@@ -47,6 +47,7 @@ pub struct PanelBusPeripherals {
     pub panel_bus_usart_tx: PanelBusUsartTx,
     pub panel_bus_usart_tx_dma: PanelBusUsartTxDma,
     pub panel_bus_usart_rx_dma: PanelBusUsartRxDma,
+    pub ser_out_en: Output<'static>,
 }
 
 pub struct RadioPeripherals {
@@ -76,7 +77,6 @@ pub struct Board {
     pub status_leds: [Output<'static>; 4],
     pub pir_1: Input<'static>,
     pub pir_2: Input<'static>,
-    pub ser_out_en: Output<'static>,
 }
 
 #[allow(unused_variables)]
@@ -138,6 +138,7 @@ pub fn hookup() -> Board {
             panel_bus_usart_tx: p.PA2,
             panel_bus_usart_tx_dma: p.DMA1_CH7,
             panel_bus_usart_rx_dma: p.DMA1_CH6,
+            ser_out_en: Output::new(p.PA4, Level::High, Speed::VeryHigh),
         },
         radio: RadioPeripherals {
             rf_cs: Output::new(p.PB0, Level::High, Speed::VeryHigh),
@@ -168,7 +169,6 @@ pub fn hookup() -> Board {
         ],
         pir_1: Input::new(p.PB10, Pull::Up),
         pir_2: Input::new(p.PB2, Pull::Up),
-        ser_out_en: Output::new(p.PA4, Level::High, Speed::VeryHigh),
     }
 }
 

@@ -87,8 +87,8 @@ impl UsbPort {
 
         UsbPort {
             class,
-            // This has to continue living, or else the pin will float.
             breaker: LineBreaker::new(256),
+            // This has to continue living, or else the pin will float.
             _usb_pullup: usb_peripherals.usb_pullup,
         }
     }
@@ -117,9 +117,9 @@ impl UsbPort {
 
     pub async fn write_line(&mut self, line: &[u8]) {
         let mut writer = CdcWriter::new(&mut self.class);
-        writer.write_all(line).await;
-        writer.write(b"\r").await;
-        writer.flush().await;
+        let _ = writer.write_all(line).await;
+        let _ = writer.write(b"\n").await;
+        let _ = writer.flush().await;
     }
 }
 
@@ -149,11 +149,11 @@ impl embedded_io::Error for CdcWriterError {
     }
 }
 
-impl<'w, 'a> embedded_io::ErrorType for CdcWriter<'w, 'a> {
+impl embedded_io::ErrorType for CdcWriter<'_, '_> {
     type Error = CdcWriterError;
 }
 
-impl<'w, 'a> Write for CdcWriter<'w, 'a> {
+impl Write for CdcWriter<'_, '_> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         match self.class.write_packet(buf).await {
             Ok(_) => Ok(buf.len()),
