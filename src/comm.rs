@@ -1,4 +1,7 @@
-use crate::board::{PanelBusPeripherals, PanelBusUsart, RadioPeripherals};
+use crate::{
+    board::{PanelBusPeripherals, PanelBusUsart, RadioPeripherals},
+    cmd_processor::Message,
+};
 use alloc::boxed::Box;
 use defmt::{debug, error};
 use embassy_stm32::{
@@ -25,31 +28,35 @@ impl Address {
 
 pub const BROADCAST_ADDRESS: Address = Address(0xFF);
 
-type PacketData = heapless::Vec<u8, { MAX_PAYLOAD_SIZE + 5 }>;
+type PacketData = heapless::Vec<u8, { MAX_PAYLOAD_SIZE }>;
 
 /// Internal representation of a packet
 ///
-/// The wire format of a packet is:
-/// [from, len, data*, crc]
+/// The wire format of a packet is a little goofy because it's
+/// backwards-compatible with the C++ version:
+///
+/// [0x55, 0xaa, to, data_len+2, from, tag, data*, crc]
+///
+/// For this struct, only to, from, tag, and data are stored, the rest are calculated
+/// when the packet is serialized. So self.data is:
+///
+/// [to, data_len+2, from, tag, data*]
 ///
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Packet {
-    from: Address,
-    data: PacketData,
+pub struct Packet {
+    pub from: Address,
+    pub to: Address,
+    pub tag: u8,
+    pub data: PacketData,
 }
 
 impl Packet {
-    pub fn new(from: Address) -> Self {
+    pub fn new(from: Address, to: Address, tag: u8) -> Self {
         Self {
             from,
+            to,
+            tag,
             data: PacketData::new(),
-        }
-    }
-
-    pub fn from_wire(wire: &[u8]) -> Self {
-        Self {
-            from: Address(wire[0]),
-            data: PacketData::from_slice(&wire[1..]).unwrap(),
         }
     }
 
@@ -57,12 +64,37 @@ impl Packet {
         self.data.extend_from_slice(data).unwrap();
     }
 
-    pub fn to_wire(self) -> [u8; MAX_PAYLOAD_SIZE + 5] {
-        let mut wire = [0; MAX_PAYLOAD_SIZE + 5];
-        wire[0] = self.from.value();
-        wire[1] = self.data.len() as u8;
-        wire[2..self.data.len() + 2].copy_from_slice(&self.data);
-        wire
+    /// Write the packet to a buffer in wire format.
+    ///
+    /// The buffer must be at least MAX_PAYLOAD_SIZE + 8 bytes long.
+    ///
+    pub fn wire_format<'a>(&self, buf: &'a mut [u8]) -> &'a [u8] {
+        buf[0..6].copy_from_slice(&[
+            0x55,
+            0xaa,
+            self.to.value(),
+            self.data.len() as u8 + 2,
+            self.from.value(),
+            self.tag,
+        ]);
+        buf[6..6 + self.data.len()].copy_from_slice(&self.data);
+        // TODO: calculate crc
+        buf[6 + self.data.len() + 1] = b'C';
+        &buf[..6 + self.data.len() + 2]
+    }
+}
+
+impl defmt::Format for Packet {
+    fn format(&self, fmt: defmt::Formatter<'_>) {
+        let data = self.data.as_slice();
+        defmt::write!(
+            fmt,
+            "({:x} -> {:x}) {} {:02x}",
+            self.from.value(),
+            self.to.value(),
+            self.tag as char,
+            data
+        );
     }
 }
 
@@ -73,31 +105,33 @@ pub enum CommMode {
 
 pub struct PanelComm {
     mode: CommMode,
+    from: Address,
     radio: PanelRadio,
     serial: PanelSerial,
 }
 
 impl PanelComm {
-    pub fn new(mode: CommMode, address: Address, radio: PanelRadio, serial: PanelSerial) -> Self {
+    pub fn new(mode: CommMode, from: Address, radio: PanelRadio, serial: PanelSerial) -> Self {
         Self {
             mode,
+            from,
             radio,
             serial,
         }
     }
 
-    pub async fn send_packet(&mut self, to: Address, data: &[u8]) {
-        debug!("Sending packet to {:x}: {:x}", to.value(), data);
+    pub async fn send_packet(&mut self, packet: Packet) {
+        debug!("Sending packet: {:?}", packet);
         match self.mode {
-            CommMode::Radio => self.radio.send_packet(to, data).await,
-            CommMode::Serial => self.serial.send_packet(to, data).await,
+            CommMode::Radio => self.radio.send_packet(packet).await,
+            CommMode::Serial => self.serial.send_packet(packet).await,
         }
     }
 
-    pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
+    pub async fn recv_packet(&mut self) -> Packet {
         match self.mode {
-            CommMode::Radio => self.radio.recv_packet(buffer).await,
-            CommMode::Serial => self.serial.recv_packet(buffer).await,
+            CommMode::Radio => self.radio.recv_packet().await,
+            CommMode::Serial => self.serial.recv_packet().await,
         }
     }
 }
@@ -109,11 +143,11 @@ impl PanelRadio {
         Self {}
     }
 
-    pub async fn send_packet(&mut self, to: Address, data: &[u8]) {
+    pub async fn send_packet(&mut self, packet: Packet) {
         todo!()
     }
 
-    pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
+    pub async fn recv_packet(&mut self) -> Packet {
         todo!()
     }
 }
@@ -157,18 +191,16 @@ impl PanelSerial {
         }
     }
 
-    pub async fn send_packet(&mut self, to: Address, data: &[u8]) {
-        if data.len() > MAX_PAYLOAD_SIZE {
+    pub async fn send_packet(&mut self, packet: Packet) {
+        if packet.data.len() > MAX_PAYLOAD_SIZE {
             error!("Data length too long");
             return;
         }
-        let mut buf = heapless::Vec::<u8, { MAX_PAYLOAD_SIZE + 5 }>::new();
-        buf.extend_from_slice(&[0x55, 0xaa, to.value(), data.len() as u8])
-            .unwrap();
-        buf.extend_from_slice(data).unwrap();
-        // TODO: calculate crc
-        let crc = b'C';
-        buf.push(crc).unwrap();
+
+        let mut buf = [0u8; MAX_PAYLOAD_SIZE + 8];
+        let wire_data = packet.wire_format(&mut buf);
+        debug!("Wire format: {:x}", wire_data);
+
         self.ser_out_en.set_high();
 
         // Need to manually enable the transmitter
@@ -178,10 +210,11 @@ impl PanelSerial {
             w.set_te(true);
         });
 
-        if self.tx.write_all(&buf).await.is_err() {
+        if self.tx.write_all(wire_data).await.is_err() {
             error!("Error writing packet");
         }
         self.tx.flush().await.unwrap();
+
         self.ser_out_en.set_low();
 
         // Need to manually enable the receiver after tx is done
@@ -191,7 +224,9 @@ impl PanelSerial {
         });
     }
 
-    pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
+    // TODO: mid-packet timeout
+
+    pub async fn recv_packet(&mut self) -> Packet {
         loop {
             while self.read_byte().await != 0x55 {}
             if self.read_byte().await != 0xaa {
@@ -199,21 +234,31 @@ impl PanelSerial {
             }
             let to = self.read_byte().await;
             let len = self.read_byte().await as usize;
-            if len > buffer.len() {
+            if !(2..=MAX_PAYLOAD_SIZE + 2).contains(&len) {  // +2 for from and tag
                 continue;
             }
-            if self.rx.read(&mut buffer[0..len as usize]).await.is_err() {
-                continue;
-            };
+            let from = Address(self.read_byte().await);
+            let tag = self.read_byte().await;
+
+            let data_len = len - 2;  // Subtract from and tag
+            let mut packet = Packet::new(from, Address(to), tag);
+
+            if data_len > 0 {
+                let _ = packet.data.resize(data_len, 0);
+                if self.rx.read(&mut packet.data[0..data_len]).await.is_err() {
+                    continue;
+                }
+            }
+
             let crc = self.read_byte().await;
             // TODO: real crc check
             if crc != b'C' {
                 error!("CRC error");
                 continue;
             }
-            debug!("to {:x}: {:x}", to, &buffer[0..len as usize]);
+            debug!("Received packet: {:?}", packet);
             if to == BROADCAST_ADDRESS.value() || to == self.address.value() {
-                return &buffer[0..len as usize];
+                return packet;
             }
         }
     }

@@ -1,10 +1,10 @@
-use core::error::Error;
-use core::fmt::Write;
 use crate::boot::get_boot_count;
-use crate::comm::{BROADCAST_ADDRESS, MAX_PAYLOAD_SIZE, PanelComm};
+use crate::comm::{BROADCAST_ADDRESS, MAX_PAYLOAD_SIZE, Packet, PanelComm};
 use crate::fixed_vec::FixedVec;
 use crate::version;
 use crate::{Interactor, Mode, comm::Address, flash::set_default_mode};
+use core::error::Error;
+use core::fmt::Write;
 use defmt::{debug, info};
 use embassy_futures::select::{self, Either, select};
 use embassy_futures::yield_now;
@@ -133,10 +133,9 @@ impl<'a> CmdProcessor<'a> {
         info!("Panel mode");
         loop {
             let mut cmd_buf = [0; 256];
-            let mut comm_buf = [0; MAX_PAYLOAD_SIZE];
             match select(
                 self.interactor.read_command(&mut cmd_buf),
-                self.comm.recv_packet(&mut comm_buf),
+                self.comm.recv_packet(),
             )
             .await
             {
@@ -230,17 +229,17 @@ impl<'a> CmdProcessor<'a> {
             self.address.value(),
             self.mode as u8,
             mode_str,
-        ).unwrap();
+        )
+        .unwrap();
 
         let _ = self.reply_buf.extend_from_slice(response.as_bytes());
     }
 
     async fn command_enumerate(&mut self, _args: &[u8]) {
-        let packet = [self.address.0, Message::Ping as u8];
+        let packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Ping as u8);
         self.panels.clear();
 
-        self.send_message(BROADCAST_ADDRESS, &packet, Duration::from_millis(40))
-            .await;
+        self.send_message(packet, Duration::from_millis(40)).await;
 
         // Format response as JSON array
         let mut w = heapless::String::<256>::new();
@@ -278,8 +277,7 @@ impl<'a> CmdProcessor<'a> {
             return;
         }
 
-        let mut packet: Vec<u8, { MAX_PAYLOAD_SIZE }> = Vec::new();
-        packet.push(Command::SetColor as u8).unwrap();
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::SetColor as u8);
 
         // Parse RGB values for each slot
         for offset in (0..args.len()).step_by(2) {
@@ -291,32 +289,26 @@ impl<'a> CmdProcessor<'a> {
                 }
             };
 
-            packet.push(b).unwrap();
+            packet.push_data(&[b]);
         }
 
         self.panels.clear();
-        self.send_message(
-            BROADCAST_ADDRESS,
-            packet.as_slice(),
-            Duration::from_millis(10),
-        )
-        .await;
+        self.send_message(packet, Duration::from_millis(10)).await;
 
         for panel in self.panels.iter() {
             let _ = self.reply_buf.push(b'0' + panel.pirs);
         }
     }
 
-    async fn send_message(&mut self, to: Address, packet: &[u8], reply_time: Duration) {
-        self.comm.send_packet(to, packet).await;
+    async fn send_message(&mut self, packet: Packet, reply_time: Duration) {
+        self.comm.send_packet(packet).await;
 
         let start = Instant::now();
         let deadline = start + reply_time;
         loop {
             let timeout = Timer::at(deadline);
-            let mut buf = [0; MAX_PAYLOAD_SIZE];
 
-            match select(self.comm.recv_packet(&mut buf), timeout).await {
+            match select(self.comm.recv_packet(), timeout).await {
                 Either::First(packet) => {
                     self.handle_reply(packet);
                 }
@@ -328,38 +320,33 @@ impl<'a> CmdProcessor<'a> {
         }
     }
 
-    fn handle_reply(&mut self, packet: &[u8]) {
-        debug!("Received reply: {:x}", packet);
+    fn handle_reply(&mut self, packet: Packet) {
+        debug!("Received reply: {:?}", packet);
 
-        if packet.len() < 2 {
-            return;
-        }
-        let from = Address(packet[0]);
-
-        let command = match Message::try_from(packet[1]) {
+        let command = match Message::try_from(packet.tag) {
             Ok(command) => command,
             Err(_) => {
-                debug!("Unknown reply from {:?}: {:a}", from.0, packet[1]);
+                debug!("Unknown tag: {:?}", packet.tag);
                 return;
             }
         };
 
-        let index = self.find_panel_index(from);
+        let index = self.find_panel_index(packet.from);
         let panel = self.panels.get_mut(index).unwrap();
 
         match command {
             Message::PingReply => {
-                panel.boot_count = packet[2];
-                panel.rssi_master = packet[3] as i8;
+                panel.boot_count = packet.data[0];
+                panel.rssi_master = packet.data[1] as i8;
             }
             Message::SetColorReply => {
-                panel.pirs = packet[2];
+                panel.pirs = packet.data[0];
             }
             Message::MapPanelReply => {
-                panel.slot = packet[2];
+                panel.slot = packet.data[0];
             }
             _ => {
-                debug!("Unknown reply from {:?}: {:a}", from.0, packet[1]);
+                debug!("Unknown tag: {:?}", packet.tag);
             }
         }
     }
@@ -433,64 +420,47 @@ impl<'a> CmdProcessor<'a> {
                 return;
             }
         };
-        let mut buf = [0u8; MAX_PAYLOAD_SIZE];
-        buf[0] = self.address.0;
-        buf[1] = Message::Test as u8;
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Test as u8);
         for i in 0..len {
-            buf[i as usize + 2] = i;
+            packet.push_data(&[i + 1]);
         }
-        self.send_message(
-            BROADCAST_ADDRESS,
-            &buf[0..len as usize + 2],
-            Duration::from_millis(10),
-        )
-        .await;
+        self.send_message(packet, Duration::from_millis(10)).await;
         self.reply_buf.extend_from_slice(b"OK").unwrap();
     }
 
-    async fn handle_message(&mut self, packet: &[u8]) {
-        if packet.len() < 2 {
-            return;
-        }
-        let from = Address(packet[0]);
-
-        let command = match Message::try_from(packet[1]) {
-            Ok(command) => command,
+    async fn handle_message(&mut self, packet: Packet) {
+        let tag = match Message::try_from(packet.tag) {
+            Ok(tag) => tag,
             Err(_) => {
-                debug!("Unknown reply from {:?}: {:a}", from.0, packet[1]);
+                debug!("Unknown reply from {:?}: {:a}", packet.from.0, packet.tag);
                 return;
             }
         };
 
-        debug!("Received message from {:?}: {:a}", from.0, packet[1..]);
+        debug!("Received: {:?}", packet);
 
-        let mut reply: Vec<u8, { MAX_PAYLOAD_SIZE }> = Vec::new();
-        match command {
+        match tag {
             Message::Ping => {
-                reply.push(self.address.0).unwrap();
-                reply.push(Message::PingReply as u8).unwrap();
-                reply.push(get_boot_count()).unwrap();
-                reply.push(0u8).unwrap();
+                let mut reply = Packet::new(self.address, packet.from, Message::PingReply as u8);
+                reply.push_data(&[get_boot_count()]);
+                reply.push_data(&[0u8]);
                 // TODO reply at correct time
-                self.comm.send_packet(from, &reply).await;
+                self.comm.send_packet(reply).await;
             }
             Message::SetColor => {
-                debug!("Set color {:x}", packet[2..]);
+                debug!("Set color");
             }
             Message::SetStatus => {
-                debug!("Set status {:x}", packet[2..]);
+                debug!("Set status");
             }
             Message::Reset => {
-                debug!("Reset {:?}", from.0);
+                debug!("Reset");
             }
             Message::Test => {
-                debug!("Test message {:x}", packet[2..]);
-                reply.push(self.address.0).unwrap();
-                reply.push(Message::Test as u8).unwrap();
-                self.comm.send_packet(from, &reply).await;
+                debug!("Test message");
             }
             _ => {
-                debug!("Unknown message from {:?}: {:a}", from.0, packet[1..]);
+                debug!("Unknown message from {:?}: {:a}", packet.from.0, packet.tag);
             }
         }
     }
