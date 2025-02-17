@@ -1,16 +1,15 @@
-use crate::board::{CmdPortPeripherals, PanelBusPeripherals, PanelBusUsart, RadioPeripherals};
+use crate::board::{PanelBusPeripherals, PanelBusUsart, RadioPeripherals};
 use alloc::boxed::Box;
 use defmt::{debug, error};
 use embassy_stm32::{
     bind_interrupts,
     gpio::Output,
-    mode::Async,
-    usart::{self, HalfDuplexConfig, HalfDuplexReadback, Uart},
+    usart::{self, BufferedUart, HalfDuplexConfig, HalfDuplexReadback},
 };
-use embedded_io::Write;
+use embedded_io_async::{Read, Write};
 
 bind_interrupts!(struct Irqs {
-    USART2 => usart::InterruptHandler<PanelBusUsart>;
+    USART2 => usart::BufferedInterruptHandler<PanelBusUsart>;
 });
 
 pub const MAX_PAYLOAD_SIZE: usize = 64;
@@ -25,6 +24,47 @@ impl Address {
 }
 
 pub const BROADCAST_ADDRESS: Address = Address(0xFF);
+
+type PacketData = heapless::Vec<u8, { MAX_PAYLOAD_SIZE + 5 }>;
+
+/// Internal representation of a packet
+///
+/// The wire format of a packet is:
+/// [from, len, data*, crc]
+///
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct Packet {
+    from: Address,
+    data: PacketData,
+}
+
+impl Packet {
+    pub fn new(from: Address) -> Self {
+        Self {
+            from,
+            data: PacketData::new(),
+        }
+    }
+
+    pub fn from_wire(wire: &[u8]) -> Self {
+        Self {
+            from: Address(wire[0]),
+            data: PacketData::from_slice(&wire[1..]).unwrap(),
+        }
+    }
+
+    pub fn push_data(&mut self, data: &[u8]) {
+        self.data.extend_from_slice(data).unwrap();
+    }
+
+    pub fn to_wire(self) -> [u8; MAX_PAYLOAD_SIZE + 5] {
+        let mut wire = [0; MAX_PAYLOAD_SIZE + 5];
+        wire[0] = self.from.value();
+        wire[1] = self.data.len() as u8;
+        wire[2..self.data.len() + 2].copy_from_slice(&self.data);
+        wire
+    }
+}
 
 pub enum CommMode {
     Radio,
@@ -80,24 +120,27 @@ impl PanelRadio {
 
 pub struct PanelSerial {
     ser_out_en: Output<'static>,
-    tx: usart::UartTx<'static, Async>,
-    rx: usart::UartRx<'static, Async>,
+    tx: usart::BufferedUartTx<'static>,
+    rx: usart::BufferedUartRx<'static>,
     address: Address,
 }
 
 impl PanelSerial {
     pub fn new(mut panel_bus_peripherals: PanelBusPeripherals, address: Address) -> Self {
         let mut config = usart::Config::default();
-        config.baudrate = 1_000_000;
+        config.baudrate = 256_000;
 
         panel_bus_peripherals.ser_out_en.set_low();
 
-        let uart = Uart::new_half_duplex(
+        let rx_buffer = Box::leak(Box::new([0; 256]));
+        let tx_buffer = Box::leak(Box::new([0; 256]));
+
+        let uart = BufferedUart::new_half_duplex(
             panel_bus_peripherals.panel_bus_usart,
             panel_bus_peripherals.panel_bus_usart_tx,
             Irqs,
-            panel_bus_peripherals.panel_bus_usart_tx_dma,
-            panel_bus_peripherals.panel_bus_usart_rx_dma,
+            tx_buffer,
+            rx_buffer,
             config,
             HalfDuplexReadback::NoReadback,
             HalfDuplexConfig::PushPull,
@@ -119,14 +162,33 @@ impl PanelSerial {
             error!("Data length too long");
             return;
         }
-        self.ser_out_en.set_high();
-        self.tx
-            .write_all(&[0x55, 0xaa, to.value(), data.len() as u8])
+        let mut buf = heapless::Vec::<u8, { MAX_PAYLOAD_SIZE + 5 }>::new();
+        buf.extend_from_slice(&[0x55, 0xaa, to.value(), data.len() as u8])
             .unwrap();
-        self.tx.write_all(data).unwrap();
-        self.tx.write(b"C").await.unwrap();
+        buf.extend_from_slice(data).unwrap();
+        // TODO: calculate crc
+        let crc = b'C';
+        buf.push(crc).unwrap();
+        self.ser_out_en.set_high();
+
+        // Need to manually enable the transmitter
+        // https://github.com/embassy-rs/embassy/pull/3679#issuecomment-2662106197
+        embassy_stm32::pac::USART2.cr1().modify(|w| {
+            w.set_re(false);
+            w.set_te(true);
+        });
+
+        if self.tx.write_all(&buf).await.is_err() {
+            error!("Error writing packet");
+        }
         self.tx.flush().await.unwrap();
         self.ser_out_en.set_low();
+
+        // Need to manually enable the receiver after tx is done
+        embassy_stm32::pac::USART2.cr1().modify(|w| {
+            w.set_re(true);
+            w.set_te(false);
+        });
     }
 
     pub async fn recv_packet<'a>(&mut self, buffer: &'a mut [u8]) -> &'a [u8] {
@@ -144,7 +206,12 @@ impl PanelSerial {
                 continue;
             };
             let crc = self.read_byte().await;
-            // TODO: check crc
+            // TODO: real crc check
+            if crc != b'C' {
+                error!("CRC error");
+                continue;
+            }
+            debug!("to {:x}: {:x}", to, &buffer[0..len as usize]);
             if to == BROADCAST_ADDRESS.value() || to == self.address.value() {
                 return &buffer[0..len as usize];
             }

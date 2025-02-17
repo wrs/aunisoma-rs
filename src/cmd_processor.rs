@@ -63,10 +63,10 @@ pub enum Message {
     SetColor = b'C',
     SetStatus = b'S',
     Reset = b'R',
+    Test = b'_',
     PingReply = b'I',
     SetColorReply = b'c',
     MapPanelReply = b'm',
-    TestMessage = b'_',
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +92,7 @@ pub struct MapPanelSlot {
 }
 
 pub struct CmdProcessor<'a> {
+    mode: Mode,
     interactor: Interactor<'a>,
     comm: PanelComm,
     address: Address,
@@ -103,6 +104,7 @@ pub struct CmdProcessor<'a> {
 impl<'a> CmdProcessor<'a> {
     pub fn new(interactor: Interactor<'a>, comm: PanelComm, address: Address) -> Self {
         Self {
+            mode: Mode::Master,
             interactor,
             comm,
             address,
@@ -113,6 +115,7 @@ impl<'a> CmdProcessor<'a> {
     }
 
     pub async fn run_master(mut self) {
+        self.mode = Mode::Master;
         info!("Master mode");
         loop {
             let mut buf = [0; 256];
@@ -126,6 +129,7 @@ impl<'a> CmdProcessor<'a> {
     }
 
     pub async fn run_panel(mut self) {
+        self.mode = Mode::Panel;
         info!("Panel mode");
         loop {
             let mut cmd_buf = [0; 256];
@@ -144,13 +148,14 @@ impl<'a> CmdProcessor<'a> {
                     }
                 }
                 Either::Second(packet) => {
-                    self.handle_message(packet);
+                    self.handle_message(packet).await;
                 }
             }
         }
     }
 
     pub async fn run_spy(mut self) {
+        self.mode = Mode::Spy;
         info!("Spy mode");
         loop {
             yield_now().await;
@@ -211,8 +216,23 @@ impl<'a> CmdProcessor<'a> {
     }
 
     fn command_version(&mut self, _args: &[u8]) {
-        let version = version::VERSION.as_bytes();
-        let _ = self.reply_buf.extend_from_slice(version);
+        let mode_str = match self.mode {
+            Mode::Master => "MASTER",
+            Mode::Panel => "PANEL",
+            Mode::Spy => "SPY",
+        };
+
+        let mut response = heapless::String::<128>::new();
+        write!(
+            response,
+            "Aunisoma version {} ID={} Mode={}={} Comm=?",
+            version::VERSION,
+            self.address.value(),
+            self.mode as u8,
+            mode_str,
+        ).unwrap();
+
+        let _ = self.reply_buf.extend_from_slice(response.as_bytes());
     }
 
     async fn command_enumerate(&mut self, _args: &[u8]) {
@@ -290,7 +310,8 @@ impl<'a> CmdProcessor<'a> {
     async fn send_message(&mut self, to: Address, packet: &[u8], reply_time: Duration) {
         self.comm.send_packet(to, packet).await;
 
-        let deadline = Instant::now() + reply_time;
+        let start = Instant::now();
+        let deadline = start + reply_time;
         loop {
             let timeout = Timer::at(deadline);
             let mut buf = [0; MAX_PAYLOAD_SIZE];
@@ -300,7 +321,7 @@ impl<'a> CmdProcessor<'a> {
                     self.handle_reply(packet);
                 }
                 Either::Second(_) => {
-                    // Timeout occurred
+                    debug!("Timeout at {:?}", Instant::now() - start);
                     break;
                 }
             }
@@ -308,6 +329,8 @@ impl<'a> CmdProcessor<'a> {
     }
 
     fn handle_reply(&mut self, packet: &[u8]) {
+        debug!("Received reply: {:x}", packet);
+
         if packet.len() < 2 {
             return;
         }
@@ -323,8 +346,6 @@ impl<'a> CmdProcessor<'a> {
 
         let index = self.find_panel_index(from);
         let panel = self.panels.get_mut(index).unwrap();
-
-        debug!("Received reply from {:?}: {:a}", from.0, packet[1..]);
 
         match command {
             Message::PingReply => {
@@ -414,7 +435,7 @@ impl<'a> CmdProcessor<'a> {
         };
         let mut buf = [0u8; MAX_PAYLOAD_SIZE];
         buf[0] = self.address.0;
-        buf[1] = Message::TestMessage as u8;
+        buf[1] = Message::Test as u8;
         for i in 0..len {
             buf[i as usize + 2] = i;
         }
@@ -462,10 +483,10 @@ impl<'a> CmdProcessor<'a> {
             Message::Reset => {
                 debug!("Reset {:?}", from.0);
             }
-            Message::TestMessage => {
+            Message::Test => {
                 debug!("Test message {:x}", packet[2..]);
                 reply.push(self.address.0).unwrap();
-                reply.push(Message::TestMessage as u8).unwrap();
+                reply.push(Message::Test as u8).unwrap();
                 self.comm.send_packet(from, &reply).await;
             }
             _ => {
