@@ -1,5 +1,3 @@
-use core::ops::Range;
-use defmt::debug;
 use crate::fixed_vec::FixedVec;
 
 pub struct LineBreaker {
@@ -61,13 +59,13 @@ impl LineBreaker {
                 if self.buffer.extend_from_slice(rest).is_ok() {
                     // We saved the beginning of the next line, yay happy path!
                     self.used_prefix = line_len;
-                    return Some(&self.buffer[..line_len - 1]);
+                    return Some(&self.buffer[..line_len]);
                 }
                 // We didn't have room for the beginning of the next line, so
                 // discard the rest of it.
                 self.discard = true;
                 self.used_prefix = line_len;
-                Some(&self.buffer[..line_len - 1])
+                Some(&self.buffer[..line_len])
             } else {
                 // Line too long, discard it
                 self.buffer.clear();

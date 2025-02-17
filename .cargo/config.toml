@@ -10,7 +10,7 @@ rustflags = [
 target = "thumbv7m-none-eabi"
 
 [env]
-DEFMT_LOG = "aunisoma=debug,embassy_usb=warn"
+DEFMT_LOG = "aunisoma=debug,embassy_stm32=info,embassy_usb=warn"
 # DEFMT_LOG = "info"
 
 # Link scripts are set in build.rs

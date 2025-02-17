@@ -1,54 +1,64 @@
-use core::cell::RefCell;
-
-use cortex_m::interrupt::{Mutex, free};
+use alloc::boxed::Box;
 use embassy_stm32::gpio::Output;
 
 pub struct StatusLEDs {
     pub leds: [Output<'static>; 4],
 }
 
-static STATUS_LEDS: Mutex<RefCell<Option<StatusLEDs>>> = Mutex::new(RefCell::new(None));
+static mut STATUS_LEDS: *mut StatusLEDs = core::ptr::null_mut();
 
 impl StatusLEDs {
     pub fn init(mut leds: [Output<'static>; 4]) {
         for led in leds.iter_mut() {
             led.set_low();
         }
-        free(|cs| {
-            let status = STATUS_LEDS.borrow(cs);
-            *status.borrow_mut() = Some(StatusLEDs { leds });
-        });
+
+        unsafe {
+            STATUS_LEDS = Box::leak(Box::new(StatusLEDs { leds }));
+        }
     }
 
     #[inline(never)]
     pub fn set(which: usize) {
-        free(|cs| {
-            let mut status_leds = STATUS_LEDS.borrow(cs).borrow_mut();
-            let leds = status_leds.as_mut().unwrap();
-            leds.leds[which].set_high();
-        });
+        unsafe {
+            (*STATUS_LEDS).leds[which].set_high();
+        }
     }
 
     #[inline(never)]
     pub fn reset(which: usize) {
-        free(|cs| {
-            let mut status_leds = STATUS_LEDS.borrow(cs).borrow_mut();
-            let leds = status_leds.as_mut().unwrap();
-            leds.leds[which].set_low();
-        });
+        unsafe {
+            (*STATUS_LEDS).leds[which].set_low();
+        }
     }
 
     pub fn set_all(value: u8) {
-        free(|cs| {
-            let mut status_leds = STATUS_LEDS.borrow(cs).borrow_mut();
-            let leds = status_leds.as_mut().unwrap();
+        unsafe {
             for i in 0..4 {
                 if value & (1 << i) != 0 {
-                    leds.leds[i].set_high();
+                    (*STATUS_LEDS).leds[i].set_high();
                 } else {
-                    leds.leds[i].set_low();
+                    (*STATUS_LEDS).leds[i].set_low();
                 }
             }
-        });
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_fast(which: usize) {
+        if which < 4 {
+            embassy_stm32::pac::GPIOB
+                .bsrr()
+                .write(|w| w.set_bs(15 - which, true));
+        }
+    }
+
+    #[inline(always)]
+    pub fn reset_fast(which: usize) {
+        if which < 4 {
+            embassy_stm32::pac::GPIOB
+                .bsrr()
+                .write(|w| w.set_br(15 - which, true));
+        }
     }
 }

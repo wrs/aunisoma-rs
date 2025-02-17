@@ -131,10 +131,10 @@ impl<'a> Interactor<'a> {
         &buf[..line.len()]
     }
 
-    pub async fn reply(&mut self, line: &[u8]) {
+    pub async fn reply(&mut self, line: &str) {
         match self.source {
-            CommandSource::Serial => self.port.write_line(line).await,
-            CommandSource::Usb => self.usb.write_line(line).await,
+            CommandSource::Serial => self.port.write_line(line.as_bytes()).await,
+            CommandSource::Usb => self.usb.write_line(line.as_bytes()).await,
         }
     }
 }

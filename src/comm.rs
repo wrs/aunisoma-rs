@@ -120,7 +120,7 @@ impl PanelComm {
         }
     }
 
-    pub async fn send_packet(&mut self, packet: Packet) {
+    pub async fn send_packet(&mut self, packet: &Packet) {
         debug!("Sending packet: {:?}", packet);
         match self.mode {
             CommMode::Radio => self.radio.send_packet(packet).await,
@@ -143,7 +143,7 @@ impl PanelRadio {
         Self {}
     }
 
-    pub async fn send_packet(&mut self, packet: Packet) {
+    pub async fn send_packet(&mut self, packet: &Packet) {
         todo!()
     }
 
@@ -181,7 +181,10 @@ impl PanelSerial {
         )
         .unwrap();
 
-        let (tx, rx) = uart.split();
+        let (mut tx, rx) = uart.split();
+
+        // Without this, the first write doesn't happen until the second write
+        embedded_io::Write::write(&mut tx, &[]).unwrap();
 
         Self {
             ser_out_en: panel_bus_peripherals.ser_out_en,
@@ -191,7 +194,7 @@ impl PanelSerial {
         }
     }
 
-    pub async fn send_packet(&mut self, packet: Packet) {
+    pub async fn send_packet(&mut self, packet: &Packet) {
         if packet.data.len() > MAX_PAYLOAD_SIZE {
             error!("Data length too long");
             return;
@@ -199,7 +202,7 @@ impl PanelSerial {
 
         let mut buf = [0u8; MAX_PAYLOAD_SIZE + 8];
         let wire_data = packet.wire_format(&mut buf);
-        debug!("Wire format: {:x}", wire_data);
+        // debug!("Wire format: {:x}", wire_data);
 
         self.ser_out_en.set_high();
 
@@ -225,6 +228,8 @@ impl PanelSerial {
     }
 
     // TODO: mid-packet timeout
+    // TODO: crc check
+    // TODO: could we just receive until idle?
 
     pub async fn recv_packet(&mut self) -> Packet {
         loop {
@@ -234,18 +239,19 @@ impl PanelSerial {
             }
             let to = self.read_byte().await;
             let len = self.read_byte().await as usize;
-            if !(2..=MAX_PAYLOAD_SIZE + 2).contains(&len) {  // +2 for from and tag
+            if !(2..=MAX_PAYLOAD_SIZE + 2).contains(&len) {
+                // +2 for from and tag
                 continue;
             }
             let from = Address(self.read_byte().await);
             let tag = self.read_byte().await;
 
-            let data_len = len - 2;  // Subtract from and tag
+            let data_len = len - 2; // Subtract from and tag
             let mut packet = Packet::new(from, Address(to), tag);
 
             if data_len > 0 {
                 let _ = packet.data.resize(data_len, 0);
-                if self.rx.read(&mut packet.data[0..data_len]).await.is_err() {
+                if self.rx.read_exact(&mut packet.data[0..data_len]).await.is_err() {
                     continue;
                 }
             }
@@ -253,10 +259,12 @@ impl PanelSerial {
             let crc = self.read_byte().await;
             // TODO: real crc check
             if crc != b'C' {
-                error!("CRC error");
+                error!("CRC error: {:02x}", crc);
                 continue;
             }
+
             debug!("Received packet: {:?}", packet);
+
             if to == BROADCAST_ADDRESS.value() || to == self.address.value() {
                 return packet;
             }
@@ -265,10 +273,12 @@ impl PanelSerial {
 
     async fn read_byte(&mut self) -> u8 {
         let mut buffer = [0; 1];
-        match self.rx.read(&mut buffer).await {
-            Ok(_) => debug!("Rcvd: 0x{:x}", buffer[0]),
-            Err(e) => error!("Error reading byte: {:?}", e),
+        embassy_stm32::pac::GPIOB.bsrr().write(|w| w.set_bs(13, true));
+        if let Err(e) = self.rx.read(&mut buffer).await {
+            error!("read_byte error: {:?}", e);
         }
+        embassy_stm32::pac::GPIOB.bsrr().write(|w| w.set_br(13, true));
+        // debug!("Received: {:02x}", buffer[0]);
         buffer[0]
     }
 }

@@ -61,12 +61,13 @@ pub enum Command {
 pub enum Message {
     Ping = b'P',
     SetColor = b'C',
-    SetStatus = b'S',
+    MapPanels = b'M',
     Reset = b'R',
+    SetStatus = b'S',
     Test = b'_',
     PingReply = b'I',
     SetColorReply = b'c',
-    MapPanelReply = b'm',
+    MapPanelsReply = b'm',
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,7 +99,7 @@ pub struct CmdProcessor<'a> {
     address: Address,
     panels: FixedVec<PanelInfo>,
     mapping: FixedVec<u8>,
-    reply_buf: FixedVec<u8>,
+    reply_buf: heapless::String<256>,
 }
 
 impl<'a> CmdProcessor<'a> {
@@ -110,7 +111,7 @@ impl<'a> CmdProcessor<'a> {
             address,
             panels: FixedVec::new(MAX_PANEL_SLOTS),
             mapping: FixedVec::new(MAX_PANEL_SLOTS),
-            reply_buf: FixedVec::new(256),
+            reply_buf: heapless::String::<256>::new(),
         }
     }
 
@@ -120,6 +121,7 @@ impl<'a> CmdProcessor<'a> {
         loop {
             let mut buf = [0; 256];
             let line = self.interactor.read_command(&mut buf).await;
+            // defmt::debug!("Command: {:a}", line);
             self.reply_buf.clear();
             self.handle_command(Mode::Master, line).await;
             if !self.reply_buf.is_empty() {
@@ -185,16 +187,14 @@ impl<'a> CmdProcessor<'a> {
             }
 
             _ => {
-                let _ = self.reply_buf.extend_from_slice(b"ERROR Unknown command");
+                let _ = self.reply_buf.push_str("ERROR Unknown command");
             }
         }
     }
 
     fn command_default_mode(&mut self, args: &[u8]) {
         if args.len() != 1 {
-            let _ = self
-                .reply_buf
-                .extend_from_slice(b"ERROR Expected M, P, or S");
+            let _ = self.reply_buf.push_str("ERROR Expected M, P, or S");
             return;
         }
 
@@ -203,9 +203,7 @@ impl<'a> CmdProcessor<'a> {
             b'P' => Mode::Panel,
             b'S' => Mode::Spy,
             _ => {
-                let _ = self
-                    .reply_buf
-                    .extend_from_slice(b"ERROR Expected M, P, or S");
+                let _ = self.reply_buf.push_str("ERROR Expected M, P, or S");
                 return;
             }
         };
@@ -232,14 +230,14 @@ impl<'a> CmdProcessor<'a> {
         )
         .unwrap();
 
-        let _ = self.reply_buf.extend_from_slice(response.as_bytes());
+        let _ = self.reply_buf.push_str(response.as_str());
     }
 
     async fn command_enumerate(&mut self, _args: &[u8]) {
         let packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Ping as u8);
         self.panels.clear();
 
-        self.send_message(packet, Duration::from_millis(40)).await;
+        self.send_message(&packet, Duration::from_millis(40)).await;
 
         // Format response as JSON array
         let mut w = heapless::String::<256>::new();
@@ -259,21 +257,19 @@ impl<'a> CmdProcessor<'a> {
             .unwrap();
         }
         write!(w, "]").unwrap();
-        let _ = self.reply_buf.extend_from_slice(w.as_bytes());
+        let _ = self.reply_buf.push_str(w.as_str());
     }
 
     async fn command_set_color(&mut self, args: &[u8]) {
         // Each color takes 6 hex digits (2 each for R,G,B)
         if args.len() % 6 != 0 {
-            let _ = self
-                .reply_buf
-                .extend_from_slice(b"ERROR Expected 6 hex digits per color");
+            let _ = self.reply_buf.push_str("ERROR Expected 6 hex digits per color");
             return;
         }
 
         let num_colors = args.len() / 6;
         if num_colors > MAX_PANEL_SLOTS {
-            let _ = self.reply_buf.extend_from_slice(b"ERROR Too many slots");
+            let _ = self.reply_buf.push_str("ERROR Too many slots");
             return;
         }
 
@@ -284,7 +280,7 @@ impl<'a> CmdProcessor<'a> {
             let b = match parse_hex_byte(&args[offset..offset + 2]) {
                 Some(v) => v,
                 None => {
-                    let _ = self.reply_buf.extend_from_slice(b"ERROR Invalid hex byte");
+                    let _ = self.reply_buf.push_str("ERROR Invalid hex byte");
                     return;
                 }
             };
@@ -293,14 +289,144 @@ impl<'a> CmdProcessor<'a> {
         }
 
         self.panels.clear();
-        self.send_message(packet, Duration::from_millis(10)).await;
+        self.send_message(&packet, Duration::from_millis(10)).await;
 
         for panel in self.panels.iter() {
-            let _ = self.reply_buf.push(b'0' + panel.pirs);
+            let _ = self.reply_buf.push((b'0' + panel.pirs) as char);
         }
     }
 
-    async fn send_message(&mut self, packet: Packet, reply_time: Duration) {
+    async fn command_map_panels(&mut self, args: &[u8]) {
+        // Each panel ID is 2 hex digits
+        if args.len() % 2 != 0 || args.len() > MAX_PANEL_SLOTS * 2 {
+            let _ = self.reply_buf.push_str("ERROR");
+            return;
+        }
+
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::MapPanels as u8);
+
+        let num_panels = args.len() / 2;
+
+        let mut slot_ids = Vec::<u8, 32>::new();
+        for i in 0..num_panels {
+            let offset = i * 2;
+            let id = match parse_hex_byte(&args[offset..offset + 2]) {
+                Some(v) => v,
+                None => {
+                    let _ = self.reply_buf.push_str("ERROR Invalid hex byte");
+                    return;
+                }
+            };
+            slot_ids.push(id).unwrap();
+        }
+
+        packet.push_data(&slot_ids);
+
+        let mut confirmed_slots: u32 = 0;
+
+        let start = Instant::now();
+        let timeout = Duration::from_millis(5000);
+
+        // Send the packet multiple times to ensure all panels receive it
+        for _ in 0..4 {
+            self.panels.clear();
+            self.send_message(&packet, Duration::from_millis(300)).await;
+
+            // Check which slots were assigned
+            for panel in self.panels.iter() {
+                for (j, &id) in slot_ids.iter().enumerate() {
+                    if panel.id.value() == id {
+                        confirmed_slots |= 1 << j;
+                        break;
+                    }
+                }
+            }
+
+            // Check if all slots are assigned
+            let requested_mask = (1 << num_panels) - 1;
+            if (confirmed_slots & requested_mask) == requested_mask {
+                let _ = self.reply_buf.push_str("OK");
+                return;
+            }
+
+            if start.elapsed() > timeout {
+                break;
+            }
+
+            Timer::after(Duration::from_millis(50)).await;
+        }
+
+        let _ = self.reply_buf.push_str("FAILED ");
+        for (i, &id) in slot_ids.iter().enumerate() {
+            if (confirmed_slots & (1 << i)) == 0 {
+                write!(&mut self.reply_buf, "{:02x}", id).unwrap();
+            }
+        }
+    }
+
+    async fn command_reset(&mut self, _args: &[u8]) {
+        todo!()
+    }
+
+    async fn command_test_message(&mut self, args: &[u8]) {
+        if args.len() != 2 {
+            let _ = self.reply_buf.push_str("ERROR");
+            return;
+        }
+
+        let len = match parse_hex_byte(&args[0..2]) {
+            Some(v) => v,
+            None => {
+                let _ = self.reply_buf.push_str("ERROR Invalid hex byte");
+                return;
+            }
+        };
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Test as u8);
+        for i in 0..len {
+            packet.push_data(&[i + 1]);
+        }
+        self.send_message(&packet, Duration::from_millis(10)).await;
+        let _ = self.reply_buf.push_str("OK");
+    }
+
+    async fn handle_message(&mut self, packet: Packet) {
+        let tag = match Message::try_from(packet.tag) {
+            Ok(tag) => tag,
+            Err(_) => {
+                debug!("Unknown reply from {:?}: {:a}", packet.from.0, packet.tag);
+                return;
+            }
+        };
+
+        debug!("Received: {:?}", packet);
+
+        match tag {
+            Message::Ping => {
+                let mut reply = Packet::new(self.address, packet.from, Message::PingReply as u8);
+                reply.push_data(&[get_boot_count()]);
+                reply.push_data(&[0u8]);
+                // TODO reply at correct time
+                self.comm.send_packet(&reply).await;
+            }
+            Message::SetColor => {
+                debug!("Set color");
+            }
+            Message::SetStatus => {
+                debug!("Set status");
+            }
+            Message::Reset => {
+                debug!("Reset");
+            }
+            Message::Test => {
+                debug!("Test message");
+            }
+            _ => {
+                debug!("Unknown message from {:?}: {:a}", packet.from.0, packet.tag);
+            }
+        }
+    }
+
+    async fn send_message(&mut self, packet: &Packet, reply_time: Duration) {
         self.comm.send_packet(packet).await;
 
         let start = Instant::now();
@@ -313,7 +439,6 @@ impl<'a> CmdProcessor<'a> {
                     self.handle_reply(packet);
                 }
                 Either::Second(_) => {
-                    debug!("Timeout at {:?}", Instant::now() - start);
                     break;
                 }
             }
@@ -342,7 +467,7 @@ impl<'a> CmdProcessor<'a> {
             Message::SetColorReply => {
                 panel.pirs = packet.data[0];
             }
-            Message::MapPanelReply => {
+            Message::MapPanelsReply => {
                 panel.slot = packet.data[0];
             }
             _ => {
@@ -371,98 +496,6 @@ impl<'a> CmdProcessor<'a> {
         };
         self.panels.push(panel).unwrap();
         self.panels.len() - 1
-    }
-
-    async fn command_map_panels(&mut self, args: &[u8]) {
-        // Each panel ID is 2 hex digits
-        if args.len() % 2 != 0 || args.len() > MAX_PANEL_SLOTS * 2 {
-            self.reply_buf.extend_from_slice(b"ERROR").unwrap();
-            return;
-        }
-
-        let mut slots: Vec<MapPanelSlot, MAX_PANEL_SLOTS> = Vec::new();
-        let num_panels = args.len() / 2;
-
-        // Parse panel IDs
-        for i in 0..num_panels {
-            let offset = i * 2;
-            let id = match parse_hex_byte(&args[offset..offset + 2]) {
-                Some(v) => v,
-                None => {
-                    self.reply_buf
-                        .extend_from_slice(b"ERROR Invalid hex byte")
-                        .unwrap();
-                    return;
-                }
-            };
-            slots.push(MapPanelSlot { id }).unwrap();
-        }
-
-        todo!("Process slots and generate response")
-    }
-
-    async fn command_reset(&mut self, _args: &[u8]) {
-        todo!()
-    }
-
-    async fn command_test_message(&mut self, args: &[u8]) {
-        if args.len() != 2 {
-            self.reply_buf.extend_from_slice(b"ERROR").unwrap();
-            return;
-        }
-
-        let len = match parse_hex_byte(&args[0..2]) {
-            Some(v) => v,
-            None => {
-                self.reply_buf
-                    .extend_from_slice(b"ERROR Invalid hex byte")
-                    .unwrap();
-                return;
-            }
-        };
-        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Test as u8);
-        for i in 0..len {
-            packet.push_data(&[i + 1]);
-        }
-        self.send_message(packet, Duration::from_millis(10)).await;
-        self.reply_buf.extend_from_slice(b"OK").unwrap();
-    }
-
-    async fn handle_message(&mut self, packet: Packet) {
-        let tag = match Message::try_from(packet.tag) {
-            Ok(tag) => tag,
-            Err(_) => {
-                debug!("Unknown reply from {:?}: {:a}", packet.from.0, packet.tag);
-                return;
-            }
-        };
-
-        debug!("Received: {:?}", packet);
-
-        match tag {
-            Message::Ping => {
-                let mut reply = Packet::new(self.address, packet.from, Message::PingReply as u8);
-                reply.push_data(&[get_boot_count()]);
-                reply.push_data(&[0u8]);
-                // TODO reply at correct time
-                self.comm.send_packet(reply).await;
-            }
-            Message::SetColor => {
-                debug!("Set color");
-            }
-            Message::SetStatus => {
-                debug!("Set status");
-            }
-            Message::Reset => {
-                debug!("Reset");
-            }
-            Message::Test => {
-                debug!("Test message");
-            }
-            _ => {
-                debug!("Unknown message from {:?}: {:a}", packet.from.0, packet.tag);
-            }
-        }
     }
 }
 
