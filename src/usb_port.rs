@@ -1,7 +1,9 @@
 use crate::board::UsbPeripherals;
+use crate::comm::Address;
 use crate::line_breaker::LineBreaker;
 use alloc::boxed::Box;
-use defmt::info;
+use core::fmt::Write as _;
+use defmt::{info, trace};
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::USB;
@@ -25,8 +27,12 @@ pub struct UsbPort {
 }
 
 impl UsbPort {
-    pub async fn new(mut usb_peripherals: UsbPeripherals, spawner: &'_ Spawner) -> UsbPort {
-        info!("USB init");
+    pub async fn new(
+        mut usb_peripherals: UsbPeripherals,
+        address: Address,
+        spawner: &'_ Spawner,
+    ) -> UsbPort {
+        trace!("USB init");
 
         // Reset the USB D+ pin to simulate a disconnect, so we don't have to
         // manually disconnect the USB cable every time we upload new code.
@@ -45,7 +51,9 @@ impl UsbPort {
         let mut config = embassy_usb::Config::new(1155, 22336);
         config.manufacturer.replace("Walter's Basement");
         config.product.replace("Aunisoma Controller");
-        config.serial_number.replace("00000001");
+        let serial_number = Box::leak(Box::new(heapless::String::<16>::new()));
+        write!(serial_number, "aunisoma-{:02}", address.0).unwrap();
+        config.serial_number.replace(serial_number.as_str());
         config.max_power = 500;
         config.device_class = 0x02;
         config.device_sub_class = 0x02;

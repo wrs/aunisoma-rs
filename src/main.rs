@@ -10,9 +10,9 @@ use defmt::{Format, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_time::Timer;
 use embedded_alloc::LlffHeap as Heap;
-use num_enum::TryFromPrimitive;
+use flash::get_my_id;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use status_leds::StatusLEDs;
 use usb_port::UsbPort;
 
@@ -23,7 +23,7 @@ static HEAP: Heap = Heap::empty();
 // See "wfe interfering with RTT and flashing"
 // https://github.com/embassy-rs/embassy/issues/1742
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Format, TryFromPrimitive)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Format, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Mode {
     Master = 1,
@@ -52,31 +52,31 @@ async fn main(spawner: Spawner) {
 
     StatusLEDs::init(board.status_leds);
 
-    spawner.must_spawn(blinker::blinker_task());
+    // spawner.must_spawn(blinker::blinker_task());
 
-    let address = Address(1); // TODO: Get from EEPROM
-    // let mode = boot::determine_mode(address);
-    let mode = Mode::Master;
+    let address = Address(get_my_id());
+
+    let mode = boot::determine_mode(address);
     if board::controls().user_btn_is_pressed() {
         boot::toggle_mode(mode).await;
     }
 
     info!(
-        "Aunisoma version {} ID={} Mode={}",
+        "Aunisoma version {} ID={} Mode={:?}",
         version::VERSION,
         address.0,
-        mode as u8
+        mode
     );
 
     let cmd_port = CommandSerial::new(board.cmd_port);
-    let usb_port = UsbPort::new(board.usb, &spawner).await;
+    let usb_port = UsbPort::new(board.usb, address, &spawner).await;
     let interactor = Interactor::new(cmd_port, usb_port);
 
     let radio = PanelRadio::new(board.radio);
     let panel_serial = PanelSerial::new(board.panel_bus, address);
     let comm = PanelComm::new(CommMode::Serial, address, radio, panel_serial);
 
-    let cmd_processor = CmdProcessor::new(interactor, comm, address);
+    let cmd_processor = CmdProcessor::new(interactor, comm, address, board.led_strip, board.pirs);
     match mode {
         Mode::Master => cmd_processor.run_master().await,
         Mode::Panel => cmd_processor.run_panel().await,

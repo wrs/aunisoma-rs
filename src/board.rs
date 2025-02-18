@@ -30,9 +30,9 @@ pub struct LedStrip {
 
 impl LedStrip {
     pub fn set_colors(&mut self, red: u8, green: u8, blue: u8) {
-        self.red_pwm.set_duty_cycle_fraction(red as u16, 255);
-        self.green_pwm.set_duty_cycle_fraction(green as u16, 255);
-        self.blue_pwm.set_duty_cycle_fraction(blue as u16, 255);
+        self.red_pwm.set_duty_cycle_fraction(255 - red as u16, 255);
+        self.green_pwm.set_duty_cycle_fraction(255 - green as u16, 255);
+        self.blue_pwm.set_duty_cycle_fraction(255 - blue as u16, 255);
     }
 }
 
@@ -68,6 +68,11 @@ pub struct UsbPeripherals {
     pub usb_pullup: Output<'static>,
 }
 
+pub struct Pirs {
+    pub pir_1: Input<'static>,
+    pub pir_2: Input<'static>,
+}
+
 pub struct Board {
     pub cmd_port: CmdPortPeripherals,
     pub panel_bus: PanelBusPeripherals,
@@ -75,8 +80,7 @@ pub struct Board {
     pub usb: UsbPeripherals,
     pub led_strip: LedStrip,
     pub status_leds: [Output<'static>; 4],
-    pub pir_1: Input<'static>,
-    pub pir_2: Input<'static>,
+    pub pirs: Pirs,
 }
 
 #[allow(unused_variables)]
@@ -114,7 +118,7 @@ pub fn hookup() -> Board {
     #[cfg(feature = "rev-e")]
     let led_blue = PwmPin::<TIM2, simple_pwm::Ch4>::new_ch4(p.PA3, OutputType::PushPull);
 
-    let pwm = SimplePwm::new(
+    let mut pwm = SimplePwm::new(
         p.TIM2,
         Some(led_red),
         Some(led_green),
@@ -124,6 +128,12 @@ pub fn hookup() -> Board {
         CountingMode::EdgeAlignedUp,
     )
     .split();
+    pwm.ch1.enable();
+    pwm.ch2.enable();
+    #[cfg(feature = "rev-d")]
+    pwm.ch3.enable();
+    #[cfg(feature = "rev-e")]
+    pwm.ch4.enable();
 
     unsafe { CONTROLS = Some(Controls::new(Input::new(p.PA8, Pull::Down))); }
 
@@ -167,8 +177,10 @@ pub fn hookup() -> Board {
             Output::new(p.PB13, Level::High, Speed::VeryHigh),
             Output::new(p.PB12, Level::High, Speed::VeryHigh),
         ],
-        pir_1: Input::new(p.PB10, Pull::Up),
-        pir_2: Input::new(p.PB2, Pull::Up),
+        pirs: Pirs {
+            pir_1: Input::new(p.PB10, Pull::None),
+            pir_2: Input::new(p.PB2, Pull::None),
+        },
     }
 }
 

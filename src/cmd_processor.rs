@@ -1,16 +1,17 @@
+use crate::board::{LedStrip, Pirs};
 use crate::boot::get_boot_count;
-use crate::comm::{BROADCAST_ADDRESS, MAX_PAYLOAD_SIZE, Packet, PanelComm};
+use crate::comm::{BROADCAST_ADDRESS, Packet, PanelComm};
 use crate::fixed_vec::FixedVec;
-use crate::version;
+use crate::status_leds::StatusLEDs;
 use crate::{Interactor, Mode, comm::Address, flash::set_default_mode};
-use core::error::Error;
+use crate::{board, version};
 use core::fmt::Write;
-use defmt::{debug, info};
-use embassy_futures::select::{self, Either, select};
+use defmt::{debug, info, trace};
+use embassy_futures::select::{Either, select};
 use embassy_futures::yield_now;
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
-use num_enum::TryFromPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 // Protocol message types and constants
 const MAX_PANEL_SLOTS: usize = 32;
@@ -44,7 +45,7 @@ const MAX_PANEL_SLOTS: usize = 32;
 
 */
 
-#[derive(Debug, Clone, Copy, TryFromPrimitive)]
+#[derive(Debug, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Command {
     DefaultMode = b'D',
@@ -56,7 +57,7 @@ pub enum Command {
     TestMessage = b'_',
 }
 
-#[derive(Debug, Clone, Copy, TryFromPrimitive)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Message {
     Ping = b'P',
@@ -80,37 +81,35 @@ pub struct PanelInfo {
     pub slot: u8,
 }
 
-#[derive(Debug)]
-pub struct SetColorSlot {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-#[derive(Debug)]
-pub struct MapPanelSlot {
-    pub id: u8,
-}
-
 pub struct CmdProcessor<'a> {
     mode: Mode,
     interactor: Interactor<'a>,
     comm: PanelComm,
     address: Address,
+    led_strip: LedStrip,
+    pirs: Pirs,
     panels: FixedVec<PanelInfo>,
-    mapping: FixedVec<u8>,
+    my_slot: Option<u8>,
     reply_buf: heapless::String<256>,
 }
 
 impl<'a> CmdProcessor<'a> {
-    pub fn new(interactor: Interactor<'a>, comm: PanelComm, address: Address) -> Self {
+    pub fn new(
+        interactor: Interactor<'a>,
+        comm: PanelComm,
+        address: Address,
+        led_strip: LedStrip,
+        pirs: Pirs,
+    ) -> Self {
         Self {
             mode: Mode::Master,
             interactor,
             comm,
             address,
+            led_strip,
+            pirs,
             panels: FixedVec::new(MAX_PANEL_SLOTS),
-            mapping: FixedVec::new(MAX_PANEL_SLOTS),
+            my_slot: None,
             reply_buf: heapless::String::<256>::new(),
         }
     }
@@ -214,19 +213,19 @@ impl<'a> CmdProcessor<'a> {
 
     fn command_version(&mut self, _args: &[u8]) {
         let mode_str = match self.mode {
-            Mode::Master => "MASTER",
-            Mode::Panel => "PANEL",
-            Mode::Spy => "SPY",
+            Mode::Master => "Master",
+            Mode::Panel => "Panel",
+            Mode::Spy => "Spy",
         };
 
         let mut response = heapless::String::<128>::new();
         write!(
             response,
-            "Aunisoma version {} ID={} Mode={}={} Comm=?",
+            "Aunisoma version {} ID={} Mode={} Comm={}",
             version::VERSION,
             self.address.value(),
-            self.mode as u8,
             mode_str,
+            self.comm.mode_name(),
         )
         .unwrap();
 
@@ -234,7 +233,7 @@ impl<'a> CmdProcessor<'a> {
     }
 
     async fn command_enumerate(&mut self, _args: &[u8]) {
-        let packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Ping as u8);
+        let packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Ping);
         self.panels.clear();
 
         self.send_message(&packet, Duration::from_millis(40)).await;
@@ -263,7 +262,9 @@ impl<'a> CmdProcessor<'a> {
     async fn command_set_color(&mut self, args: &[u8]) {
         // Each color takes 6 hex digits (2 each for R,G,B)
         if args.len() % 6 != 0 {
-            let _ = self.reply_buf.push_str("ERROR Expected 6 hex digits per color");
+            let _ = self
+                .reply_buf
+                .push_str("ERROR Expected 6 hex digits per color");
             return;
         }
 
@@ -273,7 +274,7 @@ impl<'a> CmdProcessor<'a> {
             return;
         }
 
-        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::SetColor as u8);
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::SetColor);
 
         // Parse RGB values for each slot
         for offset in (0..args.len()).step_by(2) {
@@ -303,7 +304,7 @@ impl<'a> CmdProcessor<'a> {
             return;
         }
 
-        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::MapPanels as u8);
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::MapPanels);
 
         let num_panels = args.len() / 2;
 
@@ -381,49 +382,12 @@ impl<'a> CmdProcessor<'a> {
                 return;
             }
         };
-        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Test as u8);
+        let mut packet = Packet::new(self.address, BROADCAST_ADDRESS, Message::Test);
         for i in 0..len {
             packet.push_data(&[i + 1]);
         }
         self.send_message(&packet, Duration::from_millis(10)).await;
         let _ = self.reply_buf.push_str("OK");
-    }
-
-    async fn handle_message(&mut self, packet: Packet) {
-        let tag = match Message::try_from(packet.tag) {
-            Ok(tag) => tag,
-            Err(_) => {
-                debug!("Unknown reply from {:?}: {:a}", packet.from.0, packet.tag);
-                return;
-            }
-        };
-
-        debug!("Received: {:?}", packet);
-
-        match tag {
-            Message::Ping => {
-                let mut reply = Packet::new(self.address, packet.from, Message::PingReply as u8);
-                reply.push_data(&[get_boot_count()]);
-                reply.push_data(&[0u8]);
-                // TODO reply at correct time
-                self.comm.send_packet(&reply).await;
-            }
-            Message::SetColor => {
-                debug!("Set color");
-            }
-            Message::SetStatus => {
-                debug!("Set status");
-            }
-            Message::Reset => {
-                debug!("Reset");
-            }
-            Message::Test => {
-                debug!("Test message");
-            }
-            _ => {
-                debug!("Unknown message from {:?}: {:a}", packet.from.0, packet.tag);
-            }
-        }
     }
 
     async fn send_message(&mut self, packet: &Packet, reply_time: Duration) {
@@ -448,30 +412,34 @@ impl<'a> CmdProcessor<'a> {
     fn handle_reply(&mut self, packet: Packet) {
         debug!("Received reply: {:?}", packet);
 
-        let command = match Message::try_from(packet.tag) {
-            Ok(command) => command,
-            Err(_) => {
-                debug!("Unknown tag: {:?}", packet.tag);
-                return;
-            }
-        };
-
         let index = self.find_panel_index(packet.from);
         let panel = self.panels.get_mut(index).unwrap();
 
-        match command {
+        match packet.tag {
             Message::PingReply => {
-                panel.boot_count = packet.data[0];
-                panel.rssi_master = packet.data[1] as i8;
+                if packet.data.len() == 2 {
+                    panel.boot_count = packet.data[0];
+                    panel.rssi_master = packet.data[1] as i8;
+                } else {
+                    debug!("PingReply: Invalid data length");
+                }
             }
             Message::SetColorReply => {
-                panel.pirs = packet.data[0];
+                if packet.data.len() == 1 {
+                    panel.pirs = packet.data[0];
+                } else {
+                    debug!("SetColorReply: Invalid data length");
+                }
             }
             Message::MapPanelsReply => {
-                panel.slot = packet.data[0];
+                if packet.data.len() == 1 {
+                    panel.slot = packet.data[0];
+                } else {
+                    debug!("MapPanelsReply: Invalid data length");
+                }
             }
             _ => {
-                debug!("Unknown tag: {:?}", packet.tag);
+                debug!("Unknown reply from {:x}: {:a}", packet.from.0, packet.tag as u8 as char);
             }
         }
     }
@@ -496,6 +464,106 @@ impl<'a> CmdProcessor<'a> {
         };
         self.panels.push(panel).unwrap();
         self.panels.len() - 1
+    }
+
+    // Incoming messages (panel mode)
+
+    async fn handle_message(&mut self, packet: Packet) {
+        let arrival_time = Instant::now();
+
+        debug!("Received: {:?}", packet);
+
+        let mut reply = Packet::new(self.address, packet.from, Message::Test);
+        let reply_delay = Duration::from_millis(2);
+
+        match packet.tag {
+            Message::MapPanels => {
+                self.handle_map_panels(&packet, &mut reply);
+            }
+            Message::Ping => {
+                reply.tag = Message::PingReply;
+                reply.push_data(&[get_boot_count()]);
+                reply.push_data(&[0u8]);
+            }
+            Message::SetColor => {
+                self.handle_set_color(&packet, &mut reply);
+            }
+            Message::SetStatus => {
+                debug!("Set status");
+                if packet.data.len() == 1 {
+                    StatusLEDs::set_all(packet.data[0]);
+                }
+            }
+            Message::Reset => {
+                debug!("Reset");
+                cortex_m::peripheral::SCB::sys_reset();
+            }
+            Message::Test => {
+                debug!("Test message");
+                reply.tag = Message::Test;
+                let _ = reply.data.extend_from_slice(&packet.data);
+            }
+            _ => {
+                debug!("Unknown message from {:x}: {:a}", packet.from.0, packet.tag as u8);
+                return;
+            }
+        }
+
+        trace!(
+            "Arrival {:?}us, reply {:?}us",
+            arrival_time.as_micros(),
+            Instant::now().as_micros()
+        );
+
+        Timer::at(arrival_time + reply_delay).await;
+        self.comm.send_packet(&reply).await;
+    }
+
+    fn handle_map_panels(&mut self, packet: &Packet, reply: &mut Packet) {
+        let num_slots = packet.data.len();
+        if num_slots > MAX_PANEL_SLOTS {
+            debug!("MapPanels: Too many slots");
+            return;
+        }
+
+        if let Some((slot, _)) = packet
+            .data
+            .iter()
+            .enumerate()
+            .find(|&(_, &id)| id == self.address.value())
+        {
+            debug!("MapPanels: Mapping to slot {}", slot);
+            self.my_slot = Some(slot as u8);
+            reply.push_data(&[slot as u8]);
+            reply.tag = Message::MapPanelsReply;
+        } else {
+            debug!("MapPanels: Didn't find my ID");
+            self.my_slot = None;
+        }
+    }
+
+    fn handle_set_color(&mut self, packet: &Packet, reply: &mut Packet) {
+        if let Some(my_slot) = self.my_slot {
+            if (my_slot + 1) as usize * 3 > packet.data.len() {
+                debug!("SetColor: Not enough data");
+                return;
+            }
+
+            let r = packet.data[my_slot as usize * 3];
+            let g = packet.data[my_slot as usize * 3 + 1];
+            let b = packet.data[my_slot as usize * 3 + 2];
+
+            self.led_strip.set_colors(r, g, b);
+
+            debug!("SetColor: RGB {:02x},{:02x},{:02x}", r, g, b);
+
+            let pirs = (self.pirs.pir_1.is_high() as u8) | ((self.pirs.pir_2.is_high() as u8) << 1);
+
+            reply.push_data(&[pirs]);
+            reply.tag = Message::SetColorReply;
+        } else {
+            debug!("SetColor: Not mapped");
+        }
     }
 }
 

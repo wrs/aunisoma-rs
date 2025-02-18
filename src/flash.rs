@@ -21,7 +21,7 @@ pub fn get_default_mode() -> Mode {
     let mode = match Mode::try_from(data1) {
         Ok(mode) => mode,
         Err(_) => {
-            write_user_bytes(data0, Mode::Panel as u8);
+            write_user_bytes(data0, Mode::Panel.into());
             Mode::Panel
         }
     };
@@ -34,7 +34,7 @@ pub fn get_default_mode() -> Mode {
 pub fn set_default_mode(mode: Mode) {
     unsafe { DEFAULT_MODE = mode };
     let (data0, _) = get_user_bytes();
-    write_user_bytes(data0, mode as u8);
+    write_user_bytes(data0, mode.into());
 }
 
 pub fn get_user_bytes() -> (u8, u8) {

@@ -4,7 +4,7 @@ import sys
 import time
 import json
 
-port = "hwgrep://0001"
+port = "hwgrep://soma-08"
 print(f'Using port {port}')
 
 ser = serial.serial_for_url(port, 230400, timeout=2)

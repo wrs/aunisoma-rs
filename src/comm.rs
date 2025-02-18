@@ -46,12 +46,12 @@ type PacketData = heapless::Vec<u8, { MAX_PAYLOAD_SIZE }>;
 pub struct Packet {
     pub from: Address,
     pub to: Address,
-    pub tag: u8,
+    pub tag: Message,
     pub data: PacketData,
 }
 
 impl Packet {
-    pub fn new(from: Address, to: Address, tag: u8) -> Self {
+    pub fn new(from: Address, to: Address, tag: Message) -> Self {
         Self {
             from,
             to,
@@ -75,12 +75,12 @@ impl Packet {
             self.to.value(),
             self.data.len() as u8 + 2,
             self.from.value(),
-            self.tag,
+            self.tag.into(),
         ]);
         buf[6..6 + self.data.len()].copy_from_slice(&self.data);
         // TODO: calculate crc
-        buf[6 + self.data.len() + 1] = b'C';
-        &buf[..6 + self.data.len() + 2]
+        buf[6 + self.data.len()] = b'C';
+        &buf[..6 + self.data.len() + 1]
     }
 }
 
@@ -89,10 +89,10 @@ impl defmt::Format for Packet {
         let data = self.data.as_slice();
         defmt::write!(
             fmt,
-            "({:x} -> {:x}) {} {:02x}",
+            "({:x} -> {:x}) {:a} {:02x}",
             self.from.value(),
             self.to.value(),
-            self.tag as char,
+            self.tag as u8 as char,
             data
         );
     }
@@ -132,6 +132,13 @@ impl PanelComm {
         match self.mode {
             CommMode::Radio => self.radio.recv_packet().await,
             CommMode::Serial => self.serial.recv_packet().await,
+        }
+    }
+
+    pub fn mode_name(&self) -> &'static str {
+        match self.mode {
+            CommMode::Radio => "Radio",
+            CommMode::Serial => "Serial",
         }
     }
 }
@@ -245,6 +252,13 @@ impl PanelSerial {
             }
             let from = Address(self.read_byte().await);
             let tag = self.read_byte().await;
+            let tag = match Message::try_from(tag) {
+                Ok(tag) => tag,
+                Err(_) => {
+                    error!("Invalid tag: {:02x}", tag);
+                    continue;
+                }
+            };
 
             let data_len = len - 2; // Subtract from and tag
             let mut packet = Packet::new(from, Address(to), tag);
@@ -263,7 +277,7 @@ impl PanelSerial {
                 continue;
             }
 
-            debug!("Received packet: {:?}", packet);
+            // debug!("Received packet: {:?}", packet);
 
             if to == BROADCAST_ADDRESS.value() || to == self.address.value() {
                 return packet;
@@ -273,11 +287,9 @@ impl PanelSerial {
 
     async fn read_byte(&mut self) -> u8 {
         let mut buffer = [0; 1];
-        embassy_stm32::pac::GPIOB.bsrr().write(|w| w.set_bs(13, true));
         if let Err(e) = self.rx.read(&mut buffer).await {
             error!("read_byte error: {:?}", e);
         }
-        embassy_stm32::pac::GPIOB.bsrr().write(|w| w.set_br(13, true));
         // debug!("Received: {:02x}", buffer[0]);
         buffer[0]
     }
