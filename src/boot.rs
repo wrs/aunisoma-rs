@@ -1,7 +1,14 @@
 use defmt::{debug, info};
-use embassy_time::Timer;
+use embassy_futures::select::{self, select};
+use embassy_time::{Duration, Instant, Timer};
 
-use crate::{Mode, board, comm::Address, flash, status_leds::StatusLEDs};
+use crate::{
+    Mode,
+    board::{self, pet_the_watchdog, watchdog_petter},
+    comm::{Address, CommMode},
+    flash,
+    status_leds::StatusLEDs,
+};
 
 #[unsafe(link_section = ".noinit")]
 static mut BOOT_COUNT: u8 = 0;
@@ -50,52 +57,104 @@ pub fn get_boot_count() -> u8 {
 /// switched between Master and Panel. The default mode can also be changed
 /// with the 'D' command.
 ///
+/// The default comm mode for an uninitialized board is Radio.
+///
 pub fn determine_mode(address: Address) -> Mode {
     if address == Address(0) {
         return Mode::Spy;
     }
 
-    let mode = flash::get_default_mode();
-
-    match mode {
-        Mode::Master => {
-            StatusLEDs::set(0);
-        }
-        Mode::Panel => {
-            StatusLEDs::set(1);
-        }
-        Mode::Spy => {
-            StatusLEDs::set(0);
-            StatusLEDs::set(1);
-        }
-    }
-
-    mode
+    flash::get_default_mode()
 }
 
-/// Toggle between Master and Panel modes
+/// On-board so-called UX for toggling between modes
 ///
 pub async fn toggle_mode(mode: Mode) -> ! {
-    let new_mode = match mode {
-        Mode::Master => Mode::Panel,
-        Mode::Panel => Mode::Master,
-        _ => Mode::Panel,
-    };
+    // Status LEDS 0-3 represent the following combinations:
 
-    flash::set_default_mode(new_mode);
+    const SETTINGS: [(Mode, CommMode); 4] = [
+        (Mode::Master, CommMode::Radio),
+        (Mode::Panel, CommMode::Radio),
+        (Mode::Master, CommMode::Serial),
+        (Mode::Panel, CommMode::Serial),
+    ];
 
-    info!("Mode is now {}", new_mode);
+    let user_btn = board::controls().user_btn();
 
-    // Blink lights until button is released
+    blink_lights(user_btn).await;
 
-    while board::controls().user_btn_is_pressed() {
-        StatusLEDs::set_all(0xF);
-        Timer::after_millis(250).await;
-        StatusLEDs::set_all(0);
-        Timer::after_millis(250).await;
+    debug!("Getting comm mode");
+    let comm_mode = flash::get_comm_mode();
+    let mut index = SETTINGS
+        .into_iter()
+        .enumerate()
+        .find(|(_, modes)| *modes == (mode, comm_mode))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    // Short press cycles through the settings, long press
+    // writes the current setting to flash and reboots.
+
+    'outer: loop {
+        debug!("Index {}", index);
+        StatusLEDs::set_all(1 << index);
+
+        while match select::select(watchdog_petter(), user_btn.wait_for_high()).await {
+            select::Either::First(_) => true,
+            select::Either::Second(_) => false,
+        } {}
+
+        let long_press_deadline = Instant::now() + Duration::from_millis(1000);
+        while match select::select3(
+            watchdog_petter(),
+            user_btn.wait_for_low(),
+            Timer::at(long_press_deadline),
+        )
+        .await
+        {
+            select::Either3::First(_) => true,
+            select::Either3::Second(_) => false,
+            select::Either3::Third(_) => {
+                break 'outer;
+            }
+        } {}
+
+        index = (index + 1) % SETTINGS.len();
     }
 
-    Timer::after_millis(250).await;
+    debug!("Writing mode to flash: {:?}", SETTINGS[index]);
+
+    flash::set_default_mode(SETTINGS[index].0);
+    flash::set_comm_mode(SETTINGS[index].1);
+
+    blink_lights(user_btn).await;
 
     cortex_m::peripheral::SCB::sys_reset();
+}
+
+/// Blink lights until button is released
+///
+async fn blink_lights(
+    user_btn: &mut crate::debouncer::Debouncer<embassy_stm32::exti::ExtiInput<'_>>,
+) {
+    debug!("Blinking lights");
+    let mut lights_on = true;
+    while match select::select3(
+        watchdog_petter(),
+        Timer::after_millis(250),
+        user_btn.wait_for_low(),
+    )
+    .await
+    {
+        select::Either3::First(_) => {
+            // Watchdog petted
+            true
+        }
+        select::Either3::Second(_) => {
+            StatusLEDs::set_all(if lights_on { 0xF } else { 0 });
+            lights_on = !lights_on;
+            true
+        }
+        select::Either3::Third(_) => false,
+    } {}
 }

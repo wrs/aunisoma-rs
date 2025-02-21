@@ -1,6 +1,8 @@
+use core::future::Future;
 use core::sync::atomic::{AtomicU32, Ordering};
-
-use defmt::debug;
+use embassy_futures::select;
+use embassy_futures::select::{Either3, select3};
+use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::peripherals::{self, IWDG};
 use embassy_stm32::peripherals::{SPI1, TIM2, USART1, USART2};
@@ -8,7 +10,10 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::CountingMode;
 use embassy_stm32::timer::simple_pwm::{self, PwmPin, SimplePwm, SimplePwmChannel};
 use embassy_stm32::wdg::IndependentWatchdog;
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
+use futures::pin_mut;
+
+use crate::debouncer::Debouncer;
 
 pub type DbgUsart = USART1;
 pub type DbgUsartRx = peripherals::PA10;
@@ -24,6 +29,8 @@ pub type RadioInt = peripherals::PB11;
 pub type RadioExti = peripherals::EXTI11; // really EXTI15_10
 pub type UsbDp = peripherals::PA12;
 pub type UsbDm = peripherals::PA11;
+pub type UserBtn = peripherals::PA8;
+pub type UserBtnExti = peripherals::EXTI8;
 
 pub struct LedStrip {
     pub red_pwm: SimplePwmChannel<'static, LedTimer>,
@@ -111,7 +118,6 @@ pub fn hookup() -> Board {
 
     unsafe {
         let mut watchdog = IndependentWatchdog::new(p.IWDG, 1_000_000);
-        watchdog.unleash();
         WATCHDOG = Some(watchdog);
     }
 
@@ -153,7 +159,7 @@ pub fn hookup() -> Board {
     }
 
     unsafe {
-        CONTROLS = Some(Controls::new(Input::new(p.PA8, Pull::Down)));
+        CONTROLS = Some(Controls::new(ExtiInput::new(p.PA8, p.EXTI8, Pull::Down)));
     }
 
     Board {
@@ -203,8 +209,15 @@ pub fn hookup() -> Board {
 
 static mut WATCHDOG: Option<IndependentWatchdog<'static, IWDG>> = None;
 
+pub fn unleash_the_watchdog() {
+    unsafe {
+        #[allow(static_mut_refs)]
+        WATCHDOG.as_mut().unwrap().unleash();
+    }
+}
+
 pub fn pet_the_watchdog() {
-    debug!("Petting watchdog");
+    // debug!("Petting watchdog");
     unsafe {
         #[allow(static_mut_refs)]
         WATCHDOG.as_mut().unwrap().pet();
@@ -224,7 +237,7 @@ pub async fn watchdog_petter() {
         // New interval
         deadline_in_ms = Instant::now().as_millis() + WATCHDOG_INTERVAL_MS;
         NEXT_DEADLINE.store((deadline_in_ms / DEADLINE_SCALE) as u32, Ordering::Release);
-        debug!("New watchdog deadline: {} ms", deadline_in_ms);
+        // debug!("New watchdog deadline: {} ms", deadline_in_ms);
     }
 
     Timer::at(Instant::from_millis(deadline_in_ms)).await;
@@ -235,24 +248,26 @@ pub async fn watchdog_petter() {
 }
 
 pub struct Controls {
-    pub user_btn: Input<'static>,
+    pub user_btn: Debouncer<ExtiInput<'static>>,
 }
 
 impl Controls {
-    pub fn new(user_btn: Input<'static>) -> Self {
-        Self { user_btn }
+    pub fn new(input: ExtiInput<'static>) -> Self {
+        Self {
+            user_btn: Debouncer::new(input, Duration::from_millis(10)),
+        }
     }
 
-    pub fn user_btn_is_pressed(&self) -> bool {
-        self.user_btn.is_high()
+    pub fn user_btn(&mut self) -> &mut Debouncer<ExtiInput<'static>> {
+        &mut self.user_btn
     }
 }
 
 static mut CONTROLS: Option<Controls> = None;
 
-pub fn controls() -> &'static Controls {
+pub fn controls() -> &'static mut Controls {
     #[allow(static_mut_refs)]
     unsafe {
-        CONTROLS.as_ref().unwrap()
+        CONTROLS.as_mut().unwrap()
     }
 }

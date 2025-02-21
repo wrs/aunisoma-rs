@@ -3,7 +3,7 @@ use crate::comm::Address;
 use crate::line_breaker::LineBreaker;
 use alloc::boxed::Box;
 use core::fmt::Write as _;
-use defmt::{debug, info, trace};
+use defmt::{info, trace};
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::USB;
@@ -106,10 +106,9 @@ impl UsbPort {
         loop {
             self.class.wait_connection().await;
             loop {
-                debug!("Reading packet");
                 match self.class.read_packet(&mut buf).await {
                     Ok(n) => {
-                        debug!("Read {:a}", &buf[..n]);
+                        // debug!("USB read {:a}", &buf[..n]);
                         if let Some(line) = self.breaker.process(&buf[..n]) {
                             into[..line.len()].copy_from_slice(line);
                             return &into[..line.len()];

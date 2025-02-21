@@ -17,6 +17,7 @@ use embassy_stm32::{
 use embassy_time::Timer;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use embedded_io_async::{Read, Write};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use rfm69::{Rfm69, registers};
 
 bind_interrupts!(struct Irqs {
@@ -117,9 +118,11 @@ impl defmt::Format for Packet {
     }
 }
 
+#[derive(Debug, Format, PartialEq, Eq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
 pub enum CommMode {
-    Radio,
-    Serial,
+    Radio = 1,
+    Serial = 2,
 }
 
 pub struct PanelComm {

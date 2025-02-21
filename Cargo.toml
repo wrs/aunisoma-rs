@@ -21,7 +21,7 @@ embedded-io-async = "0.6.1"
 embedded-storage = "0.3.1"
 
 embassy-executor = { version = "0.7.0", features = [
-    "task-arena-size-4096",
+    "task-arena-size-5120",
     "arch-cortex-m",
     "executor-thread",
     "executor-interrupt",
@@ -49,7 +49,6 @@ panic-itm = "0.4.2"
 rfm69 = { version = "0.6.0", features = [] }
 embedded-hal-bus = { version = "0.3.0", features = [] }
 defmt = { version = "0.3.10", features = [] }
-
 defmt-rtt = { version = "0.4.1" }
 embassy-futures = "0.1.1"
 futures = { version = "0.3.31", default-features = false, features = [] }
@@ -57,6 +56,7 @@ num_enum = { version = "0.7.3", default-features = false, features = [] }
 async-trait = "0.1.86"
 embedded-alloc = "0.6.0"
 bare-metal = "1.0.0"
+bitfield = "0.18.1"
 
 # change lint defaults
 [lints.rust]

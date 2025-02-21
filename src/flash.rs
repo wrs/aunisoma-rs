@@ -1,53 +1,176 @@
-use crate::{Mode, boot};
-use defmt::{debug, info, panic};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::{Mode, boot, comm::CommMode};
+use bitfield::bitfield;
+use defmt::{Format, debug, info, panic};
 use embassy_stm32::pac::FLASH;
 
-pub fn get_my_id() -> u8 {
-    let (data0, _) = get_user_bytes();
-    data0
-}
+// The option bytes register is only read from flash at power-up, so we cache
+// the current values in .noinit RAM.
 
 #[unsafe(link_section = ".noinit")]
-static mut DEFAULT_MODE: Mode = Mode::Panel;
+static mut CACHED_USER_BYTES: UserBytes = UserBytes {
+    id: 0,
+    data1: Data1(0),
+};
+
+static CACHED_USER_BYTES_LOCK: AtomicBool = AtomicBool::new(false);
+
+fn with_cached_user_bytes<F, R>(f: F) -> R
+where
+    F: FnOnce(&'static mut UserBytes) -> R,
+{
+    #[allow(static_mut_refs)]
+    if CACHED_USER_BYTES_LOCK
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let result = f(unsafe { &mut CACHED_USER_BYTES });
+        CACHED_USER_BYTES_LOCK.store(false, Ordering::SeqCst);
+        result
+    } else {
+        panic!("cached_user_bytes already in use");
+    }
+}
+
+pub fn init_user_configuration() {
+    if boot::is_warm_boot() {
+        info!("warm boot");
+    } else {
+        unsafe { CACHED_USER_BYTES = UserBytes::get() };
+        info!("cold boot");
+    }
+    with_cached_user_bytes(|user_bytes| info!("user bytes {:?}", user_bytes));
+}
+
+pub fn get_my_id() -> u8 {
+    with_cached_user_bytes(|user_bytes| user_bytes.get_id())
+}
 
 pub fn get_default_mode() -> Mode {
-    if boot::is_warm_boot() {
-        info!("warm boot, default mode={}", unsafe { DEFAULT_MODE } as u8);
-        return unsafe { DEFAULT_MODE };
-    }
-
-    let (data0, data1) = get_user_bytes();
-
-    let mode = match Mode::try_from(data1) {
-        Ok(mode) => mode,
-        Err(_) => {
-            write_user_bytes(data0, Mode::Panel.into());
-            Mode::Panel
-        }
-    };
-
-    unsafe { core::ptr::write_volatile(&raw mut DEFAULT_MODE, mode) };
-
-    mode
+    with_cached_user_bytes(|user_bytes| {
+        Mode::try_from(user_bytes.default_mode()).unwrap_or(Mode::Panel)
+    })
 }
 
 pub fn set_default_mode(mode: Mode) {
-    unsafe { DEFAULT_MODE = mode };
-    let (data0, _) = get_user_bytes();
-    write_user_bytes(data0, mode.into());
+    with_cached_user_bytes(|user_bytes| user_bytes.set_default_mode(mode.into()));
 }
 
-pub fn get_user_bytes() -> (u8, u8) {
-    (FLASH.obr().read().data0(), FLASH.obr().read().data1())
+pub fn get_comm_mode() -> CommMode {
+    with_cached_user_bytes(|user_bytes| {
+        CommMode::try_from(user_bytes.comm_mode()).unwrap_or(CommMode::Radio)
+    })
 }
 
-pub fn write_user_bytes(data0: u8, data1: u8) {
-    unlock();
-    ob_unlock();
-    ob_erase();
-    ob_write_data_bytes(data0, data1);
-    ob_lock();
-    lock();
+pub fn set_comm_mode(mode: CommMode) {
+    with_cached_user_bytes(|user_bytes| user_bytes.set_comm_mode(mode.into()));
+}
+
+// I'd rather use bitfield-struct, but it's generating defmt stuff that
+// won't compile, despite defmt=false.
+
+bitfield! {
+    #[derive(Clone, Copy)]
+    struct Data1(u8);
+    u8;
+    default_mode, set_default_mode: 1, 0;  // bits 0-1 for default mode
+    comm_mode, set_comm_mode: 3, 2;       // bit 2-3 for comm mode
+}
+
+/// Assigns meaning to the 2 bytes of EEPROM user data on the STM32F1.
+///
+/// This deals in raw values. The get_ and set_ functions above translate
+/// to/from the enums.
+///
+struct UserBytes {
+    id: u8,
+    data1: Data1,
+}
+
+impl Format for UserBytes {
+    fn format(&self, fmt: defmt::Formatter<'_>) {
+        defmt::write!(
+            fmt,
+            "UserBytes(id={}, default_mode={} ",
+            self.id,
+            self.data1.default_mode(),
+        );
+        if let Ok(mode) = Mode::try_from(self.data1.default_mode()) {
+            defmt::write!(fmt, "({:?})", mode);
+        } else {
+            defmt::write!(fmt, "(invalid)");
+        }
+        defmt::write!(fmt, ", comm_mode={}", self.data1.comm_mode());
+        if let Ok(mode) = CommMode::try_from(self.data1.comm_mode()) {
+            defmt::write!(fmt, "({:?})", mode);
+        } else {
+            defmt::write!(fmt, "(invalid)");
+        }
+        defmt::write!(fmt, ")");
+    }
+}
+
+impl UserBytes {
+    pub fn get() -> Self {
+        let id = FLASH.obr().read().data0();
+        let mut data1 = Data1(FLASH.obr().read().data1());
+
+        // Clean up the possibly uninitialized data1
+        if Mode::try_from(data1.default_mode()).is_err() {
+            defmt::warn!("default mode invalid, setting to Panel");
+            data1.set_default_mode(Mode::Panel.into());
+        }
+        if CommMode::try_from(data1.comm_mode()).is_err() {
+            defmt::warn!("comm mode invalid, setting to Radio");
+            data1.set_comm_mode(CommMode::Radio.into());
+        }
+
+        let result = Self { id, data1 };
+        debug!("Read from flash: {:?}", &result);
+        result
+    }
+
+    pub fn get_id(&self) -> u8 {
+        self.id
+    }
+
+    // There is no set_id() because we set the ID once per board to match
+    // the number written on it.
+
+    pub fn default_mode(&self) -> u8 {
+        self.data1.default_mode()
+    }
+
+    pub fn set_default_mode(&mut self, mode: u8) {
+        if mode > 3 {
+            panic!("invalid default mode");
+        }
+        self.data1.set_default_mode(mode);
+        self.write();
+    }
+
+    pub fn comm_mode(&self) -> u8 {
+        self.data1.comm_mode()
+    }
+
+    pub fn set_comm_mode(&mut self, mode: u8) {
+        if mode > 3 {
+            panic!("invalid comm mode");
+        }
+        self.data1.set_comm_mode(mode);
+        self.write();
+    }
+
+    pub fn write(&self) {
+        debug!("writing {:?}", self);
+        unlock();
+        ob_unlock();
+        ob_erase();
+        ob_write_data_bytes(self.id, self.data1.0);
+        ob_lock();
+        lock();
+    }
 }
 
 fn unlock() {
@@ -67,6 +190,9 @@ fn ob_unlock() {
         panic!("OB didn't unlock");
     }
 }
+
+// TODO: These addresses are for STM32F103C8. I couldn't find option bytes
+// support in embassy-stm32. Maybe submit a PR.
 
 const OB_RDP_ADDRESS: *mut u16 = 0x1FFFF800 as *mut u16;
 const OB_DATA_ADDRESS_DATA0: *mut u16 = 0x1FFFF804 as *mut u16;

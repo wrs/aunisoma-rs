@@ -12,7 +12,6 @@ use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embedded_alloc::LlffHeap as Heap;
-use flash::get_my_id;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use panic_halt as _;
 use status_leds::StatusLEDs;
@@ -52,32 +51,41 @@ async fn main(spawner: Spawner) {
 
     let board = board::hookup();
 
+    board::unleash_the_watchdog();
+
     StatusLEDs::init(board.status_leds);
 
-    // spawner.must_spawn(blinker::blinker_task());
+    flash::init_user_configuration();
 
-    let address = Address(get_my_id());
+    let address = Address(flash::get_my_id());
 
     let mode = boot::determine_mode(address);
-    if board::controls().user_btn_is_pressed() {
+    if board::controls().user_btn().is_high() {
         boot::toggle_mode(mode).await;
     }
 
-    info!(
-        "Aunisoma version {} ID={} Mode={:?}",
-        version::VERSION,
-        address.0,
-        mode
-    );
+    match mode {
+        Mode::Master => {
+            StatusLEDs::set(0);
+        }
+        Mode::Panel => {
+            StatusLEDs::set(1);
+        }
+        Mode::Spy => {
+            StatusLEDs::set(0);
+            StatusLEDs::set(1);
+        }
+    }
 
     let cmd_port = CommandSerial::new(board.cmd_port);
     let usb_port = UsbPort::new(board.usb, address, &spawner).await;
     let interactor = Interactor::new(cmd_port, usb_port);
 
-    let mut comm_mode = CommMode::Radio;
+    let mut comm_mode = flash::get_comm_mode();
 
     let mut radio = PanelRadio::new(board.radio);
-    if (radio.init().await).is_err() {
+
+    if comm_mode == CommMode::Radio && radio.init().await.is_err() {
         defmt::error!("Radio init failed");
         comm_mode = CommMode::Serial;
     }
@@ -87,6 +95,14 @@ async fn main(spawner: Spawner) {
     let comm = PanelComm::new(comm_mode, radio, panel_serial);
 
     let cmd_processor = CmdProcessor::new(interactor, comm, address, board.led_strip, board.pirs);
+
+    info!(
+        "Aunisoma version {} ID={} Mode={:?} Comm={:?}",
+        version::VERSION,
+        address.0,
+        mode,
+        comm_mode
+    );
 
     match mode {
         Mode::Master => cmd_processor.run_master().await,
@@ -124,11 +140,14 @@ impl<'a> Interactor<'a> {
     ) -> &'b [u8] {
         let mut cmd_buf = [0; MAX_LEN];
         let mut usb_buf = [0; MAX_LEN];
-
         let line = loop {
-            let cmd_line = self.port.read_line(&mut cmd_buf);
-            let usb_line = self.usb.read_line(&mut usb_buf);
-            match select3(watchdog_petter(), cmd_line, usb_line).await {
+            match select3(
+                watchdog_petter(),
+                self.port.read_line(&mut cmd_buf),
+                self.usb.read_line(&mut usb_buf),
+            )
+            .await
+            {
                 Either3::First(_) => {
                     // Watchdog petted
                 }
@@ -171,6 +190,7 @@ mod boot;
 mod cmd_processor;
 mod comm;
 mod command_serial;
+mod debouncer;
 mod flash;
 mod line_breaker;
 mod status_leds;
