@@ -3,14 +3,14 @@
 
 extern crate alloc;
 
+use board::watchdog_petter;
 use cmd_processor::CmdProcessor;
 use comm::{Address, CommMode, PanelComm, PanelRadio, PanelSerial};
 use command_serial::CommandSerial;
-use defmt::{Format, info};
+use defmt::{Format, debug, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
-use embassy_time::{Duration, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use flash::get_my_id;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -128,15 +128,17 @@ impl<'a> Interactor<'a> {
         let line = loop {
             let cmd_line = self.port.read_line(&mut cmd_buf);
             let usb_line = self.usb.read_line(&mut usb_buf);
-            match select3(Timer::after(Duration::from_millis(100)), cmd_line, usb_line).await {
+            match select3(watchdog_petter(), cmd_line, usb_line).await {
                 Either3::First(_) => {
-                    board::pet_the_watchdog();
+                    // Watchdog petted
                 }
                 Either3::Second(line) => {
+                    debug!("Command from serial");
                     self.source = CommandSource::Serial;
                     break line;
                 }
                 Either3::Third(line) => {
+                    debug!("Command from USB");
                     self.source = CommandSource::Usb;
                     break line;
                 }
@@ -155,6 +157,8 @@ impl<'a> Interactor<'a> {
     }
 }
 
+// Can't do this, because the panic strings are too big for flash
+//
 // #[inline(never)]
 // #[panic_handler]
 // fn core_panic(info: &core::panic::PanicInfo<'_>) -> ! {
@@ -167,7 +171,6 @@ mod boot;
 mod cmd_processor;
 mod comm;
 mod command_serial;
-mod fixed_vec;
 mod flash;
 mod line_breaker;
 mod status_leds;

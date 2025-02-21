@@ -20,10 +20,10 @@ class TimeoutError(Exception):
 
 def send_command(cmd_byte, params = ""):
 	cmd_bytes = bytes(f"{cmd_byte}{params}\n", "ascii")
-	print("> ", cmd_bytes)
+	# print("> ", cmd_bytes)
 	ser.write(cmd_bytes)
 	response = ser.read_until(b"\n")
-	print("< ", response, "\n")
+	# print("< ", response, "\n")
 
 	if len(response) == 0 :#or response[len(response)-1] != 10:
 		raise TimeoutError("Timeout")
@@ -92,7 +92,7 @@ def test():
 		ansi_cursor_up = "\x1b[A"
 		print(f"{ansi_cursor_up}{ansi_clear_line}PIRS: {str(response)}")
 		i += 1
-		time.sleep(1.02)
+		time.sleep(0.02)
 
 def test_forever():
 	while True:

@@ -3,7 +3,7 @@ use crate::comm::Address;
 use crate::line_breaker::LineBreaker;
 use alloc::boxed::Box;
 use core::fmt::Write as _;
-use defmt::{info, trace};
+use defmt::{debug, info, trace};
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::USB;
@@ -22,7 +22,7 @@ const MAX_PACKET_SIZE: u8 = 64;
 
 pub struct UsbPort {
     pub class: cdc_acm::CdcAcmClass<'static, Driver<'static, USB>>,
-    breaker: LineBreaker,
+    breaker: LineBreaker<256>,
     _usb_pullup: Output<'static>,
 }
 
@@ -95,7 +95,7 @@ impl UsbPort {
 
         UsbPort {
             class,
-            breaker: LineBreaker::new(256),
+            breaker: LineBreaker::new(),
             // This has to continue living, or else the pin will float.
             _usb_pullup: usb_peripherals.usb_pullup,
         }
@@ -106,8 +106,10 @@ impl UsbPort {
         loop {
             self.class.wait_connection().await;
             loop {
+                debug!("Reading packet");
                 match self.class.read_packet(&mut buf).await {
                     Ok(n) => {
+                        debug!("Read {:a}", &buf[..n]);
                         if let Some(line) = self.breaker.process(&buf[..n]) {
                             into[..line.len()].copy_from_slice(line);
                             return &into[..line.len()];

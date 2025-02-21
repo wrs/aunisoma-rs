@@ -1,3 +1,6 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use defmt::debug;
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::peripherals::{self, IWDG};
 use embassy_stm32::peripherals::{SPI1, TIM2, USART1, USART2};
@@ -5,14 +8,13 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::CountingMode;
 use embassy_stm32::timer::simple_pwm::{self, PwmPin, SimplePwm, SimplePwmChannel};
 use embassy_stm32::wdg::IndependentWatchdog;
+use embassy_time::{Instant, Timer};
 
 pub type DbgUsart = USART1;
 pub type DbgUsartRx = peripherals::PA10;
 pub type DbgUsartTx = peripherals::PA9;
 pub type PanelBusUsart = USART2;
 pub type PanelBusUsartTx = peripherals::PA2;
-pub type PanelBusUsartTxDma = peripherals::DMA1_CH7;
-pub type PanelBusUsartRxDma = peripherals::DMA1_CH6;
 pub type LedTimer = TIM2;
 pub type RadioSpi = SPI1;
 pub type RadioSck = peripherals::PA5;
@@ -48,8 +50,6 @@ pub struct CmdPortPeripherals {
 pub struct PanelBusPeripherals {
     pub panel_bus_usart: PanelBusUsart,
     pub panel_bus_usart_tx: PanelBusUsartTx,
-    pub panel_bus_usart_tx_dma: PanelBusUsartTxDma,
-    pub panel_bus_usart_rx_dma: PanelBusUsartRxDma,
     pub ser_out_en: Output<'static>,
 }
 
@@ -165,8 +165,6 @@ pub fn hookup() -> Board {
         panel_bus: PanelBusPeripherals {
             panel_bus_usart: p.USART2,
             panel_bus_usart_tx: p.PA2,
-            panel_bus_usart_tx_dma: p.DMA1_CH7,
-            panel_bus_usart_rx_dma: p.DMA1_CH6,
             ser_out_en: Output::new(p.PA4, Level::High, Speed::VeryHigh),
         },
         radio: RadioPeripherals {
@@ -206,10 +204,34 @@ pub fn hookup() -> Board {
 static mut WATCHDOG: Option<IndependentWatchdog<'static, IWDG>> = None;
 
 pub fn pet_the_watchdog() {
+    debug!("Petting watchdog");
     unsafe {
         #[allow(static_mut_refs)]
         WATCHDOG.as_mut().unwrap().pet();
     }
+}
+
+pub async fn watchdog_petter() {
+    const WATCHDOG_INTERVAL_MS: u64 = 500;
+
+    // Scale to make it fit in u32 but still last a long time
+    const DEADLINE_SCALE: u64 = 100;
+    static NEXT_DEADLINE: AtomicU32 = AtomicU32::new(0);
+
+    let mut deadline_in_ms: u64 = NEXT_DEADLINE.load(Ordering::Relaxed) as u64 * DEADLINE_SCALE;
+
+    if deadline_in_ms == 0 {
+        // New interval
+        deadline_in_ms = Instant::now().as_millis() + WATCHDOG_INTERVAL_MS;
+        NEXT_DEADLINE.store((deadline_in_ms / DEADLINE_SCALE) as u32, Ordering::Release);
+        debug!("New watchdog deadline: {} ms", deadline_in_ms);
+    }
+
+    Timer::at(Instant::from_millis(deadline_in_ms)).await;
+
+    pet_the_watchdog();
+
+    NEXT_DEADLINE.store(0, Ordering::Release);
 }
 
 pub struct Controls {

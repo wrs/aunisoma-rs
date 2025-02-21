@@ -1,13 +1,12 @@
-use crate::board::{self, LedStrip, Pirs};
+use crate::board::{self, watchdog_petter, LedStrip, Pirs};
 use crate::boot::get_boot_count;
 use crate::comm::{BROADCAST_ADDRESS, Packet, PanelComm};
 use crate::status_leds::StatusLEDs;
-use crate::{Interactor, Mode, comm::Address, flash::set_default_mode};
 use crate::version;
+use crate::{Interactor, Mode, comm::Address, flash::set_default_mode};
 use core::fmt::Write;
 use defmt::{debug, info, trace};
-use embassy_futures::select::{Either, select};
-use embassy_futures::yield_now;
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -122,9 +121,7 @@ impl<'a> CmdProcessor<'a> {
             // defmt::debug!("Command: {:a}", line);
             self.reply_buf.clear();
             self.handle_command(Mode::Master, line).await;
-            if !self.reply_buf.is_empty() {
-                self.interactor.reply(&self.reply_buf).await;
-            }
+            self.interactor.reply(&self.reply_buf).await;
         }
     }
 
@@ -142,9 +139,7 @@ impl<'a> CmdProcessor<'a> {
                 Either::First(line) => {
                     self.reply_buf.clear();
                     self.handle_command(Mode::Panel, line).await;
-                    if !self.reply_buf.is_empty() {
-                        self.interactor.reply(&self.reply_buf).await;
-                    }
+                    self.interactor.reply(&self.reply_buf).await;
                 }
                 Either::Second(packet) => {
                     self.handle_message(packet).await;
@@ -157,7 +152,12 @@ impl<'a> CmdProcessor<'a> {
         self.mode = Mode::Spy;
         info!("Spy mode");
         loop {
-            match select(self.comm.recv_packet(), Timer::after(Duration::from_millis(100))).await {
+            match select(
+                self.comm.recv_packet(),
+                Timer::after(Duration::from_millis(100)),
+            )
+            .await
+            {
                 Either::First(packet) => {
                     debug!("Received packet: {:?}", packet);
                 }
@@ -275,8 +275,8 @@ impl<'a> CmdProcessor<'a> {
             return;
         }
 
-        let num_colors = args.len() / 6;
-        if num_colors > MAX_PANEL_SLOTS {
+        let num_slots = args.len() / 6;
+        if num_slots > MAX_PANEL_SLOTS {
             let _ = self.reply_buf.push_str("ERROR Too many slots");
             return;
         }
@@ -297,10 +297,15 @@ impl<'a> CmdProcessor<'a> {
         }
 
         self.panels.clear();
-        self.send_message(&packet, Duration::from_millis(MAX_PANEL_SLOTS as u64)).await;
+        self.send_message(&packet, Duration::from_millis(MAX_PANEL_SLOTS as u64))
+            .await;
 
-        for panel in self.panels.iter() {
-            let _ = self.reply_buf.push((b'0' + panel.pirs) as char);
+        for slot in 0..num_slots {
+            let pirs = match self.panels.iter().find(|p| p.slot as usize == slot) {
+                Some(p) => p.pirs,
+                None => 0,
+            };
+            let _ = self.reply_buf.push((b'0' + pirs) as char);
         }
     }
 
@@ -400,23 +405,23 @@ impl<'a> CmdProcessor<'a> {
     async fn send_message(&mut self, packet: &Packet, reply_time: Duration) {
         self.comm.send_packet(packet).await;
 
-        let start = Instant::now();
-        let deadline = start + reply_time;
-        let watchdog_interval = Duration::from_millis(100);
+        let reply_deadline = Instant::now() + reply_time;
 
         loop {
-            match embassy_futures::select::select3(
+            match select3(
+                watchdog_petter(),
                 self.comm.recv_packet(),
-                Timer::after(watchdog_interval),
-                Timer::at(deadline),
-            ).await {
-                embassy_futures::select::Either3::First(packet) => {
+                Timer::at(reply_deadline),
+            )
+            .await
+            {
+                Either3::First(_) => {
+                    // Watchdog petted
+                }
+                Either3::Second(packet) => {
                     self.handle_reply(packet);
                 }
-                embassy_futures::select::Either3::Second(_) => {
-                    board::pet_the_watchdog();
-                }
-                embassy_futures::select::Either3::Third(_) => {
+                Either3::Third(_) => {
                     break;
                 }
             }
@@ -453,7 +458,10 @@ impl<'a> CmdProcessor<'a> {
                 }
             }
             _ => {
-                debug!("Unknown reply from {:x}: {:a}", packet.from.0, packet.tag as u8 as char);
+                debug!(
+                    "Unknown reply from {:x}: {:a}",
+                    packet.from.0, packet.tag as u8 as char
+                );
             }
         }
     }
@@ -518,7 +526,10 @@ impl<'a> CmdProcessor<'a> {
                 let _ = reply.data.extend_from_slice(&packet.data);
             }
             _ => {
-                debug!("Unknown message from {:x}: {:a}", packet.from.0, packet.tag as u8);
+                debug!(
+                    "Unknown message from {:x}: {:a}",
+                    packet.from.0, packet.tag as u8
+                );
                 return;
             }
         }

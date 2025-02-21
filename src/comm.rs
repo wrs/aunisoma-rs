@@ -5,7 +5,7 @@ use crate::{
     cmd_processor::Message,
 };
 use alloc::boxed::Box;
-use defmt::{debug, error, info};
+use defmt::{debug, error, info, Format};
 use embassy_stm32::{
     bind_interrupts,
     exti::ExtiInput,
@@ -160,17 +160,17 @@ impl PanelComm {
     }
 }
 
+#[derive(Format)]
 pub enum RadioError {
-    Rfm69(rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>),
+    Rfm69,
     NoRadio,
-    Timeout,
     NoPacketAvailable,
     InvalidPacket,
 }
 
 impl From<rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>> for RadioError {
-    fn from(e: rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>) -> Self {
-        RadioError::Rfm69(e)
+    fn from(_: rfm69::Error<DeviceError<embassy_stm32::spi::Error, Infallible>>) -> Self {
+        RadioError::Rfm69
     }
 }
 
@@ -296,16 +296,14 @@ impl PanelRadio {
 
     pub async fn recv_packet(&mut self) -> Packet {
         self.radio.mode(rfm69::registers::Mode::Receiver).unwrap();
-        // self.radio.write(rfm69::registers::Registers::DioMapping1, 0x40).unwrap();
         loop {
             self.dio_int.wait_for_rising_edge().await;
-            debug!("DIO interrupt");
-            // self.radio.read_many(rfm69::registers::Registers::Fifo, &mut buf)?;
+
             match try_recv(&mut self.radio).await {
                 Ok(packet) => return packet,
                 Err(RadioError::NoPacketAvailable) => continue,
-                Err(_) => {
-                    error!("Radio recv error");
+                Err(e) => {
+                    error!("Radio recv error: {:?}", e);
                     continue;
                 }
             }
@@ -332,6 +330,7 @@ impl PanelRadio {
             let mut buf = [0; 4];
             radio.read_many(rfm69::registers::Registers::Fifo, &mut buf)?;
             debug!("Received buf: {:x}", buf);
+
             let len = buf[0] as usize;
             let to = buf[1];
             let from = Address(buf[2]);

@@ -13,7 +13,7 @@ bind_interrupts!(struct Irqs {
 
 pub struct CommandSerial<'a> {
     uart: BufferedUart<'a>,
-    breaker: LineBreaker,
+    breaker: LineBreaker<256>,
 }
 
 impl CommandSerial<'_> {
@@ -35,7 +35,7 @@ impl CommandSerial<'_> {
                 config,
             )
             .unwrap(),
-            breaker: LineBreaker::new(256),
+            breaker: LineBreaker::new(),
         }
     }
 

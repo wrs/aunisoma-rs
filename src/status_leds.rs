@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use alloc::boxed::Box;
 use embassy_stm32::gpio::Output;
 

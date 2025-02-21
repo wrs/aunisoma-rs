@@ -1,15 +1,13 @@
-use crate::fixed_vec::FixedVec;
-
-pub struct LineBreaker {
-    buffer: FixedVec<u8>,
+pub struct LineBreaker<const N: usize> {
+    buffer: heapless::Vec<u8, N>,
     used_prefix: usize,
     discard: bool,
 }
 
-impl LineBreaker {
-    pub fn new(capacity: usize) -> Self {
+impl<const N: usize> LineBreaker<N> {
+    pub fn new() -> Self {
         Self {
-            buffer: FixedVec::new(capacity),
+            buffer: heapless::Vec::new(),
             used_prefix: 0,
             discard: false,
         }
