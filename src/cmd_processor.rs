@@ -1,10 +1,9 @@
-use crate::board::{LedStrip, Pirs};
+use crate::board::{self, LedStrip, Pirs};
 use crate::boot::get_boot_count;
 use crate::comm::{BROADCAST_ADDRESS, Packet, PanelComm};
-use crate::fixed_vec::FixedVec;
 use crate::status_leds::StatusLEDs;
 use crate::{Interactor, Mode, comm::Address, flash::set_default_mode};
-use crate::{board, version};
+use crate::version;
 use core::fmt::Write;
 use defmt::{debug, info, trace};
 use embassy_futures::select::{Either, select};
@@ -88,7 +87,7 @@ pub struct CmdProcessor<'a> {
     address: Address,
     led_strip: LedStrip,
     pirs: Pirs,
-    panels: FixedVec<PanelInfo>,
+    panels: heapless::Vec<PanelInfo, MAX_PANEL_SLOTS>,
     my_slot: Option<u8>,
     reply_buf: heapless::String<256>,
 }
@@ -108,7 +107,7 @@ impl<'a> CmdProcessor<'a> {
             address,
             led_strip,
             pirs,
-            panels: FixedVec::new(MAX_PANEL_SLOTS),
+            panels: heapless::Vec::new(),
             my_slot: None,
             reply_buf: heapless::String::<256>::new(),
         }
@@ -158,7 +157,14 @@ impl<'a> CmdProcessor<'a> {
         self.mode = Mode::Spy;
         info!("Spy mode");
         loop {
-            yield_now().await;
+            match select(self.comm.recv_packet(), Timer::after(Duration::from_millis(100))).await {
+                Either::First(packet) => {
+                    debug!("Received packet: {:?}", packet);
+                }
+                Either::Second(_) => {
+                    board::pet_the_watchdog();
+                }
+            }
         }
     }
 
@@ -260,6 +266,7 @@ impl<'a> CmdProcessor<'a> {
     }
 
     async fn command_set_color(&mut self, args: &[u8]) {
+        debug!("Set color: {:a}", args);
         // Each color takes 6 hex digits (2 each for R,G,B)
         if args.len() % 6 != 0 {
             let _ = self
@@ -290,7 +297,7 @@ impl<'a> CmdProcessor<'a> {
         }
 
         self.panels.clear();
-        self.send_message(&packet, Duration::from_millis(10)).await;
+        self.send_message(&packet, Duration::from_millis(MAX_PANEL_SLOTS as u64)).await;
 
         for panel in self.panels.iter() {
             let _ = self.reply_buf.push((b'0' + panel.pirs) as char);
@@ -395,14 +402,21 @@ impl<'a> CmdProcessor<'a> {
 
         let start = Instant::now();
         let deadline = start + reply_time;
-        loop {
-            let timeout = Timer::at(deadline);
+        let watchdog_interval = Duration::from_millis(100);
 
-            match select(self.comm.recv_packet(), timeout).await {
-                Either::First(packet) => {
+        loop {
+            match embassy_futures::select::select3(
+                self.comm.recv_packet(),
+                Timer::after(watchdog_interval),
+                Timer::at(deadline),
+            ).await {
+                embassy_futures::select::Either3::First(packet) => {
                     self.handle_reply(packet);
                 }
-                Either::Second(_) => {
+                embassy_futures::select::Either3::Second(_) => {
+                    board::pet_the_watchdog();
+                }
+                embassy_futures::select::Either3::Third(_) => {
                     break;
                 }
             }
@@ -570,23 +584,5 @@ impl<'a> CmdProcessor<'a> {
 /// Parse two hex digits into a byte. Returns None if the input is not a valid
 /// hex byte.
 fn parse_hex_byte(input: &[u8]) -> Option<u8> {
-    if input.len() < 2 {
-        return None;
-    }
-
-    let high = match input[0] {
-        b'0'..=b'9' => input[0] - b'0',
-        b'a'..=b'f' => input[0] - b'a' + 10,
-        b'A'..=b'F' => input[0] - b'A' + 10,
-        _ => return None,
-    };
-
-    let low = match input[1] {
-        b'0'..=b'9' => input[1] - b'0',
-        b'a'..=b'f' => input[1] - b'a' + 10,
-        b'A'..=b'F' => input[1] - b'A' + 10,
-        _ => return None,
-    };
-
-    Some((high << 4) | low)
+    u8::from_str_radix(core::str::from_utf8(input).ok()?, 16).ok()
 }

@@ -49,7 +49,7 @@ pub fn get_boot_count() -> u8 {
 /// Panel mode. If the button is down at boot, the default mode will be
 /// switched between Master and Panel. The default mode can also be changed
 /// with the 'D' command.
-
+///
 pub fn determine_mode(address: Address) -> Mode {
     if address == Address(0) {
         return Mode::Spy;
@@ -59,14 +59,14 @@ pub fn determine_mode(address: Address) -> Mode {
 
     match mode {
         Mode::Master => {
-            StatusLEDs::set(1);
+            StatusLEDs::set(0);
         }
         Mode::Panel => {
-            StatusLEDs::set(2);
+            StatusLEDs::set(1);
         }
         Mode::Spy => {
+            StatusLEDs::set(0);
             StatusLEDs::set(1);
-            StatusLEDs::set(2);
         }
     }
 
@@ -79,7 +79,7 @@ pub async fn toggle_mode(mode: Mode) -> ! {
     let new_mode = match mode {
         Mode::Master => Mode::Panel,
         Mode::Panel => Mode::Master,
-        _ => mode,
+        _ => Mode::Panel,
     };
 
     flash::set_default_mode(new_mode);

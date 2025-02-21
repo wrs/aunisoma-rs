@@ -9,10 +9,12 @@ use command_serial::CommandSerial;
 use defmt::{Format, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
+use embassy_time::{Duration, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use flash::get_my_id;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use panic_halt as _;
 use status_leds::StatusLEDs;
 use usb_port::UsbPort;
 
@@ -72,11 +74,20 @@ async fn main(spawner: Spawner) {
     let usb_port = UsbPort::new(board.usb, address, &spawner).await;
     let interactor = Interactor::new(cmd_port, usb_port);
 
-    let radio = PanelRadio::new(board.radio);
+    let mut comm_mode = CommMode::Radio;
+
+    let mut radio = PanelRadio::new(board.radio);
+    if (radio.init().await).is_err() {
+        defmt::error!("Radio init failed");
+        comm_mode = CommMode::Serial;
+    }
+
     let panel_serial = PanelSerial::new(board.panel_bus, address);
-    let comm = PanelComm::new(CommMode::Serial, address, radio, panel_serial);
+
+    let comm = PanelComm::new(comm_mode, radio, panel_serial);
 
     let cmd_processor = CmdProcessor::new(interactor, comm, address, board.led_strip, board.pirs);
+
     match mode {
         Mode::Master => cmd_processor.run_master().await,
         Mode::Panel => cmd_processor.run_panel().await,
@@ -113,17 +124,22 @@ impl<'a> Interactor<'a> {
     ) -> &'b [u8] {
         let mut cmd_buf = [0; MAX_LEN];
         let mut usb_buf = [0; MAX_LEN];
-        let cmd_line = self.port.read_line(&mut cmd_buf);
-        let usb_line = self.usb.read_line(&mut usb_buf);
 
-        let line = match select(cmd_line, usb_line).await {
-            Either::First(line) => {
-                self.source = CommandSource::Serial;
-                line
-            }
-            Either::Second(line) => {
-                self.source = CommandSource::Usb;
-                line
+        let line = loop {
+            let cmd_line = self.port.read_line(&mut cmd_buf);
+            let usb_line = self.usb.read_line(&mut usb_buf);
+            match select3(Timer::after(Duration::from_millis(100)), cmd_line, usb_line).await {
+                Either3::First(_) => {
+                    board::pet_the_watchdog();
+                }
+                Either3::Second(line) => {
+                    self.source = CommandSource::Serial;
+                    break line;
+                }
+                Either3::Third(line) => {
+                    self.source = CommandSource::Usb;
+                    break line;
+                }
             }
         };
 
@@ -139,14 +155,13 @@ impl<'a> Interactor<'a> {
     }
 }
 
-#[inline(never)]
-#[panic_handler]
-fn core_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    defmt::error!("Panic: {:?}", info);
-    loop {}
-}
+// #[inline(never)]
+// #[panic_handler]
+// fn core_panic(info: &core::panic::PanicInfo<'_>) -> ! {
+//     defmt::error!("Panic: {:?}", info);
+//     loop {}
+// }
 
-mod blinker;
 mod board;
 mod boot;
 mod cmd_processor;

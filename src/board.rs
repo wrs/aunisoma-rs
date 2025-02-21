@@ -1,9 +1,10 @@
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
-use embassy_stm32::peripherals;
+use embassy_stm32::peripherals::{self, IWDG};
 use embassy_stm32::peripherals::{SPI1, TIM2, USART1, USART2};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::CountingMode;
 use embassy_stm32::timer::simple_pwm::{self, PwmPin, SimplePwm, SimplePwmChannel};
+use embassy_stm32::wdg::IndependentWatchdog;
 
 pub type DbgUsart = USART1;
 pub type DbgUsartRx = peripherals::PA10;
@@ -31,8 +32,10 @@ pub struct LedStrip {
 impl LedStrip {
     pub fn set_colors(&mut self, red: u8, green: u8, blue: u8) {
         self.red_pwm.set_duty_cycle_fraction(255 - red as u16, 255);
-        self.green_pwm.set_duty_cycle_fraction(255 - green as u16, 255);
-        self.blue_pwm.set_duty_cycle_fraction(255 - blue as u16, 255);
+        self.green_pwm
+            .set_duty_cycle_fraction(255 - green as u16, 255);
+        self.blue_pwm
+            .set_duty_cycle_fraction(255 - blue as u16, 255);
     }
 }
 
@@ -106,6 +109,12 @@ pub fn hookup() -> Board {
 
     let p = embassy_stm32::init(config);
 
+    unsafe {
+        let mut watchdog = IndependentWatchdog::new(p.IWDG, 1_000_000);
+        watchdog.unleash();
+        WATCHDOG = Some(watchdog);
+    }
+
     // Unmap the JTAG pins so we can use PA15 as a GPIO.
     embassy_stm32::pac::AFIO
         .mapr()
@@ -129,13 +138,23 @@ pub fn hookup() -> Board {
     )
     .split();
     pwm.ch1.enable();
+    pwm.ch1.set_duty_cycle_fraction(255, 255);
     pwm.ch2.enable();
+    pwm.ch2.set_duty_cycle_fraction(255, 255);
     #[cfg(feature = "rev-d")]
-    pwm.ch3.enable();
+    {
+        pwm.ch3.enable();
+        pwm.ch3.set_duty_cycle_fraction(255, 255);
+    }
     #[cfg(feature = "rev-e")]
-    pwm.ch4.enable();
+    {
+        pwm.ch4.enable();
+        pwm.ch4.set_duty_cycle_fraction(255, 255);
+    }
 
-    unsafe { CONTROLS = Some(Controls::new(Input::new(p.PA8, Pull::Down))); }
+    unsafe {
+        CONTROLS = Some(Controls::new(Input::new(p.PA8, Pull::Down)));
+    }
 
     Board {
         cmd_port: CmdPortPeripherals {
@@ -184,6 +203,15 @@ pub fn hookup() -> Board {
     }
 }
 
+static mut WATCHDOG: Option<IndependentWatchdog<'static, IWDG>> = None;
+
+pub fn pet_the_watchdog() {
+    unsafe {
+        #[allow(static_mut_refs)]
+        WATCHDOG.as_mut().unwrap().pet();
+    }
+}
+
 pub struct Controls {
     pub user_btn: Input<'static>,
 }
@@ -202,5 +230,7 @@ static mut CONTROLS: Option<Controls> = None;
 
 pub fn controls() -> &'static Controls {
     #[allow(static_mut_refs)]
-    unsafe { CONTROLS.as_ref().unwrap() }
+    unsafe {
+        CONTROLS.as_ref().unwrap()
+    }
 }
