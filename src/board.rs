@@ -1,7 +1,4 @@
-use core::future::Future;
 use core::sync::atomic::{AtomicU32, Ordering};
-use embassy_futures::select;
-use embassy_futures::select::{Either3, select3};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::peripherals::{self, IWDG};
@@ -11,7 +8,6 @@ use embassy_stm32::timer::low_level::CountingMode;
 use embassy_stm32::timer::simple_pwm::{self, PwmPin, SimplePwm, SimplePwmChannel};
 use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_time::{Duration, Instant, Timer};
-use futures::pin_mut;
 
 use crate::debouncer::Debouncer;
 
@@ -29,8 +25,6 @@ pub type RadioInt = peripherals::PB11;
 pub type RadioExti = peripherals::EXTI11; // really EXTI15_10
 pub type UsbDp = peripherals::PA12;
 pub type UsbDm = peripherals::PA11;
-pub type UserBtn = peripherals::PA8;
-pub type UserBtnExti = peripherals::EXTI8;
 
 pub struct LedStrip {
     pub red_pwm: SimplePwmChannel<'static, LedTimer>,
@@ -117,7 +111,7 @@ pub fn hookup() -> Board {
     let p = embassy_stm32::init(config);
 
     unsafe {
-        let mut watchdog = IndependentWatchdog::new(p.IWDG, 1_000_000);
+        let watchdog = IndependentWatchdog::new(p.IWDG, 1_000_000);
         WATCHDOG = Some(watchdog);
     }
 

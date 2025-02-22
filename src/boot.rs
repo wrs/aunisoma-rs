@@ -1,10 +1,10 @@
-use defmt::{debug, info};
-use embassy_futures::select::{self, select};
+use defmt::debug;
+use embassy_futures::select::{self};
 use embassy_time::{Duration, Instant, Timer};
 
 use crate::{
     Mode,
-    board::{self, pet_the_watchdog, watchdog_petter},
+    board::{self, watchdog_petter},
     comm::{Address, CommMode},
     flash,
     status_leds::StatusLEDs,

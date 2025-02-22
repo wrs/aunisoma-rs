@@ -1,4 +1,3 @@
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{Mode, boot, comm::CommMode};
 use bitfield::bitfield;
@@ -14,22 +13,11 @@ static mut CACHED_USER_BYTES: UserBytes = UserBytes {
     data1: Data1(0),
 };
 
-static CACHED_USER_BYTES_LOCK: AtomicBool = AtomicBool::new(false);
-
-fn with_cached_user_bytes<F, R>(f: F) -> R
-where
-    F: FnOnce(&'static mut UserBytes) -> R,
-{
+fn user_bytes() -> &'static mut UserBytes {
+    // Safety: We only use the returned reference once per call.
     #[allow(static_mut_refs)]
-    if CACHED_USER_BYTES_LOCK
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let result = f(unsafe { &mut CACHED_USER_BYTES });
-        CACHED_USER_BYTES_LOCK.store(false, Ordering::SeqCst);
-        result
-    } else {
-        panic!("cached_user_bytes already in use");
+    unsafe {
+        &mut CACHED_USER_BYTES
     }
 }
 
@@ -40,31 +28,27 @@ pub fn init_user_configuration() {
         unsafe { CACHED_USER_BYTES = UserBytes::get() };
         info!("cold boot");
     }
-    with_cached_user_bytes(|user_bytes| info!("user bytes {:?}", user_bytes));
+    info!("user bytes {:?}", user_bytes());
 }
 
 pub fn get_my_id() -> u8 {
-    with_cached_user_bytes(|user_bytes| user_bytes.get_id())
+    user_bytes().get_id()
 }
 
 pub fn get_default_mode() -> Mode {
-    with_cached_user_bytes(|user_bytes| {
-        Mode::try_from(user_bytes.default_mode()).unwrap_or(Mode::Panel)
-    })
+    Mode::try_from(user_bytes().default_mode()).unwrap_or(Mode::Panel)
 }
 
 pub fn set_default_mode(mode: Mode) {
-    with_cached_user_bytes(|user_bytes| user_bytes.set_default_mode(mode.into()));
+    user_bytes().set_default_mode(mode.into());
 }
 
 pub fn get_comm_mode() -> CommMode {
-    with_cached_user_bytes(|user_bytes| {
-        CommMode::try_from(user_bytes.comm_mode()).unwrap_or(CommMode::Radio)
-    })
+    CommMode::try_from(user_bytes().comm_mode()).unwrap_or(CommMode::Radio)
 }
 
 pub fn set_comm_mode(mode: CommMode) {
-    with_cached_user_bytes(|user_bytes| user_bytes.set_comm_mode(mode.into()));
+    user_bytes().set_comm_mode(mode.into());
 }
 
 // I'd rather use bitfield-struct, but it's generating defmt stuff that
